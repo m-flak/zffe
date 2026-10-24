@@ -156,12 +156,164 @@ pub fn build(b: *std.Build) void {
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
+    // ---- FFE image pipeline: ffed3d asm -> ffe.elf -> ffe.bin + ffe.map ----
+    // `zig build` assembles, links, generates the map, compiles the shim +
+    // Zig code, and installs zffe + ffe-info + data/ffe.{bin,map,elf}.
+    // Inspect with:
+    //   zig build info -- zig-out/data/ffe.bin zig-out/data/ffe.map --lift
+    const ffed3d_dir = b.option(
+        []const u8,
+        "ffed3d",
+        "Path to ffed3d checkout, relative to CWD (default: ../ffed3d)",
+    ) orelse "../ffed3d";
+    const want_asm = b.option(
+        bool,
+        "ffe-asm",
+        "Assemble ffe.bin/ffe.map from ffed3d (needs nasm, ld.lld, llvm-objcopy)",
+    ) orelse true;
+    const nasm_exe = b.option([]const u8, "nasm", "nasm executable") orelse "nasm";
+    const ffe_ld = b.option([]const u8, "ffe-ld", "ELF linker for the ffe image") orelse "ld.lld";
+    const objcopy_exe = b.option([]const u8, "llvm-objcopy", "llvm-objcopy executable") orelse "llvm-objcopy";
+    const have_remill = b.option(bool, "have-remill", "Link real Remill/LLVM into the shim") orelse false;
+    const remill_prefix = b.option([]const u8, "remill-prefix", "Remill install prefix (with -Dhave-remill)");
+    const llvm_config_exe = b.option([]const u8, "llvm-config", "llvm-config executable (with -Dhave-remill)") orelse "llvm-config";
+
+    // Remill/LLVM link inputs, filled only when have_remill is set.
+    var remill_libpaths: std.ArrayList([]const u8) = .empty;
+    var remill_syslibs: std.ArrayList([]const u8) = .empty;
+    var remill_frameworks: std.ArrayList([]const u8) = .empty;
+
+    // Shim as a static lib so the exe, ffe-info, and both test binaries share it.
+    const shim_mod = b.createModule(.{ .target = target, .optimize = optimize });
+    const shim_lib = b.addLibrary(.{
+        .name = "zffe_shim",
+        .linkage = .static,
+        .root_module = shim_mod,
+    });
+    var shim_cflags: std.ArrayList([]const u8) = .empty;
+    shim_cflags.append(b.allocator, "-std=c++17") catch @panic("OOM");
+    if (have_remill) {
+        const rp = remill_prefix orelse {
+            std.debug.print("error: -Dhave-remill requires -Dremill-prefix\n", .{});
+            std.process.exit(1);
+        };
+        shim_cflags.append(b.allocator, "-DZFFE_HAVE_REMILL=1") catch @panic("OOM");
+        shim_mod.addIncludePath(b.graph.cwdRelativePath(b.pathJoin(&.{ rp, "include" })));
+        remill_libpaths.append(b.allocator, b.pathJoin(&.{ rp, "lib" })) catch @panic("OOM");
+        remill_syslibs.append(b.allocator, "remill") catch @panic("OOM");
+        const cxxflags = b.run(&.{ llvm_config_exe, "--cxxflags" });
+        var cit = std.mem.splitScalar(u8, cxxflags, ' ');
+        while (cit.next()) |flag| {
+            if (flag.len == 0 or flag[flag.len - 1] == '\n') {
+                const trimmed = std.mem.trim(u8, flag, " \t\r\n");
+                if (trimmed.len == 0) continue;
+                shim_cflags.append(b.allocator, trimmed) catch @panic("OOM");
+                continue;
+            }
+            shim_cflags.append(b.allocator, flag) catch @panic("OOM");
+        }
+        const ldflags = b.run(&.{ llvm_config_exe, "--ldflags", "--libs", "core", "--system-libs" });
+        var lit = std.mem.splitScalar(u8, ldflags, ' ');
+        while (lit.next()) |raw| {
+            const tok = std.mem.trim(u8, raw, " \t\r\n");
+            if (tok.len == 0) continue;
+            if (std.mem.startsWith(u8, tok, "-L")) {
+                remill_libpaths.append(b.allocator, tok[2..]) catch @panic("OOM");
+            } else if (std.mem.startsWith(u8, tok, "-l")) {
+                remill_syslibs.append(b.allocator, tok[2..]) catch @panic("OOM");
+            } else if (std.mem.eql(u8, tok, "-framework")) {
+                const fw = std.mem.trim(u8, lit.next() orelse break, " \t\r\n");
+                remill_frameworks.append(b.allocator, fw) catch @panic("OOM");
+            }
+        }
+    }
+    shim_mod.addCSourceFile(.{ .file = b.path("src/shim.cpp"), .flags = shim_cflags.items });
+    shim_mod.link_libcpp = true;
+
+    // Host tool: ELF -> ffe.map. Built always so its tests run standalone.
+    const elf2map_exe = b.addExecutable(.{
+        .name = "elf2map",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/elf2map.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    const elf2map_tests = b.addTest(.{ .root_module = elf2map_exe.root_module });
+    const run_elf2map_tests = b.addRunArtifact(elf2map_tests);
+
+    if (want_asm) {
+        // -I needs a trailing slash for %include "ffedat.asm" resolution.
+        const nasm_inc = std.fmt.allocPrint(b.allocator, "{s}/", .{ffed3d_dir}) catch @panic("OOM");
+        const nasm_ffe = b.addSystemCommand(&.{nasm_exe});
+        nasm_ffe.addArgs(&.{ "-f", "elf32", "-I", nasm_inc });
+        const ffe_obj = nasm_ffe.addPrefixedOutputFileArg("-o", "ffe.o");
+        nasm_ffe.addFileArg(b.graph.cwdRelativePath(b.pathJoin(&.{ ffed3d_dir, "ffe.asm" })));
+
+        const nasm_bmp = b.addSystemCommand(&.{nasm_exe});
+        nasm_bmp.addArgs(&.{ "-f", "elf32", "-I", nasm_inc });
+        const bmp_obj = nasm_bmp.addPrefixedOutputFileArg("-o", "ffebmp.o");
+        nasm_bmp.addFileArg(b.graph.cwdRelativePath(b.pathJoin(&.{ ffed3d_dir, "ffebmp.asm" })));
+
+        const link = b.addSystemCommand(&.{ffe_ld});
+        link.addArg("-T");
+        link.addFileArg(b.path("tools/ffe.ld"));
+        link.addArgs(&.{ "--unresolved-symbols=ignore-all", "--emit-relocs" });
+        const elf = link.addPrefixedOutputFileArg("-o", "ffe.elf");
+        link.addFileArg(ffe_obj);
+        link.addFileArg(bmp_obj);
+
+        const copy = b.addSystemCommand(&.{objcopy_exe});
+        copy.addArgs(&.{ "-O", "binary" });
+        copy.addFileArg(elf);
+        const bin = copy.addOutputFileArg("ffe.bin");
+
+        const gen_map = b.addRunArtifact(elf2map_exe);
+        gen_map.addFileArg(elf);
+        const map = gen_map.addOutputFileArg("ffe.map");
+
+        const install_bin = b.addInstallFile(bin, "data/ffe.bin");
+        const install_map = b.addInstallFile(map, "data/ffe.map");
+        const install_elf = b.addInstallFile(elf, "data/ffe.elf");
+        b.getInstallStep().dependOn(&install_bin.step);
+        b.getInstallStep().dependOn(&install_map.step);
+        b.getInstallStep().dependOn(&install_elf.step);
+
+        const ffe_step = b.step("ffe", "Assemble ffe.bin/ffe.map/ffe.elf from ffed3d sources");
+        ffe_step.dependOn(&install_bin.step);
+        ffe_step.dependOn(&install_map.step);
+        ffe_step.dependOn(&install_elf.step);
+    }
+
+    // ffe-info inspector tool.
+    const info_exe = b.addExecutable(.{
+        .name = "ffe-info",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/ffe_info.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(info_exe);
+    const info_cmd = b.addRunArtifact(info_exe);
+    info_cmd.addPassthruArgs();
+    const info_step = b.step("info", "Run ffe-info (pass: <ffe.bin> <ffe.map> [--lift])");
+    info_step.dependOn(&info_cmd.step);
+
+    // Link the shim (+ Remill/LLVM when enabled) into every module using it.
+    // Note: exe_tests shares exe.root_module and mod_tests shares mod, so
+    // three calls cover all five artifacts.
+    linkFfeDeps(b, exe.root_module, shim_lib, remill_libpaths.items, remill_syslibs.items, remill_frameworks.items);
+    linkFfeDeps(b, info_exe.root_module, shim_lib, remill_libpaths.items, remill_syslibs.items, remill_frameworks.items);
+    linkFfeDeps(b, mod, shim_lib, remill_libpaths.items, remill_syslibs.items, remill_frameworks.items);
+
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
     // make the two of them run in parallel.
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_elf2map_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
@@ -174,4 +326,19 @@ pub fn build(b: *std.Build) void {
     //
     // Lastly, the Zig build system is relatively simple and self-contained,
     // and reading its source code will allow you to master it.
+}
+
+fn linkFfeDeps(
+    b: *std.Build,
+    mod: *std.Build.Module,
+    shim_lib: *std.Build.Step.Compile,
+    libpaths: []const []const u8,
+    syslibs: []const []const u8,
+    frameworks: []const []const u8,
+) void {
+    mod.linkLibrary(shim_lib);
+    mod.link_libcpp = true;
+    for (libpaths) |p| mod.addLibraryPath(b.graph.cwdRelativePath(p));
+    for (syslibs) |l| mod.linkSystemLibrary(l, .{});
+    for (frameworks) |f| mod.linkFramework(f, .{});
 }

@@ -11,7 +11,9 @@ export fn frame() void {}
 
 export fn cleanup() void {}
 
-export fn event(ev: [*c]const sapp.Event) void {}
+export fn event(ev: [*c]const sapp.Event) void {
+    _ = ev;
+}
 
 pub fn main() !void {
     sapp.run(.{
