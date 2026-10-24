@@ -7,9 +7,12 @@
 //!   base 0x00400000
 //!   entry 0x00400000
 //!   section <name> vaddr 0x... off 0x... filesz 0x... memsz 0x... flags r-x
-//!   sym <name> 0x<addr> 0x<size> func|data|unknown
+//!   sym <name> 0x<addr> 0x<size> func|data
 //!   import <name>
 //!
+//! Only function entries and data land in the map: in .text, the globals
+//! (JUMP_* and other locals are intra-function labels); a FUNC_*-named
+//! local is still kept as a backstop. All .data/.bss syms are kept.
 //! `off` is the section's offset in the flat .bin produced by
 //! `llvm-objcopy -O binary` (VMA order, gaps zero-padded, .bss as zeros).
 
@@ -70,7 +73,7 @@ fn sectionName(shstr: []const u8, off: u32) []const u8 {
     return rest[0..len];
 }
 
-const SymKind = enum { func, data, unknown };
+const SymKind = enum { func, data };
 
 const SymEntry = struct {
     name: []const u8,
@@ -79,17 +82,31 @@ const SymEntry = struct {
     kind: SymKind,
 };
 
-fn classify(st_type: u4, sec_name: []const u8, sym_name: []const u8) SymKind {
+fn isFuncName(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "FUNC_") or std.mem.startsWith(u8, name, "_FUNC");
+}
+
+fn isDataName(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "DATA_") or std.mem.startsWith(u8, name, "_DATA_");
+}
+
+// Classify a defined symbol, or null if it doesn't belong in the map.
+fn classify(st_bind: u4, st_type: u4, sec_name: []const u8, sym_name: []const u8) ?SymKind {
     if (st_type == 2) return .func; // STT_FUNC
     if (st_type == 1) return .data; // STT_OBJECT
-    if (std.mem.startsWith(u8, sec_name, ".text")) return .func;
+    if (std.mem.startsWith(u8, sec_name, ".text")) {
+        // Entries are the globals; JUMP_* and other locals are
+        // intra-function labels. The FUNC_ backstop keeps entries the
+        // disassembler named but never globalized.
+        if (st_bind != 0 or isFuncName(sym_name)) return .func;
+        return null;
+    }
     if (std.mem.startsWith(u8, sec_name, ".data")) return .data;
     if (std.mem.startsWith(u8, sec_name, ".bss")) return .data;
     if (std.mem.startsWith(u8, sec_name, ".rodata")) return .data;
-    if (std.mem.startsWith(u8, sym_name, "FUNC_")) return .func;
-    if (std.mem.startsWith(u8, sym_name, "DATA_")) return .data;
-    if (std.mem.startsWith(u8, sym_name, "_DATA_")) return .data;
-    return .unknown;
+    if (isFuncName(sym_name)) return .func;
+    if (isDataName(sym_name)) return .data;
+    return null;
 }
 
 pub fn generate(allocator: std.mem.Allocator, elf: []const u8, input_name: []const u8, out: anytype) !void {
@@ -181,15 +198,24 @@ pub fn generate(allocator: std.mem.Allocator, elf: []const u8, input_name: []con
         }
         const st_type: u4 = @truncate(sym.info & 0xf);
         if (st_type == 4) continue; // STT_FILE: source path markers, not symbols
+        const st_bind: u4 = @truncate(sym.info >> 4);
         const sec_name: []const u8 = if (sym.shndx < shnum)
             sectionName(shstr, shdrs[sym.shndx].name)
         else
             "";
+        const kind = classify(st_bind, st_type, sec_name, name) orelse {
+            // Globals are expected to survive; warn so a dropped entry
+            // is never silent. ffe_entry is our own linker-script symbol
+            // (its address is already in the `entry` line).
+            if (st_bind != 0 and !std.mem.eql(u8, name, "ffe_entry"))
+                std.debug.print("elf2map: warning: dropping global symbol {s} (0x{x})\n", .{ name, sym.value });
+            continue;
+        };
         try syms.append(allocator, .{
             .name = name,
             .addr = sym.value,
             .size = sym.size,
-            .kind = classify(st_type, sec_name, name),
+            .kind = kind,
         });
     }
 
@@ -275,6 +301,14 @@ test "generate map from synthetic elf32" {
     try strtab.appendSlice(alloc, "DATA_0001\x00");
     const n_imp: u32 = @intCast(strtab.items.len);
     try strtab.appendSlice(alloc, "_C_DrawSprite\x00");
+    const n_jump: u32 = @intCast(strtab.items.len);
+    try strtab.appendSlice(alloc, "JUMP_000999\x00");
+    const n_clocal: u32 = @intCast(strtab.items.len);
+    try strtab.appendSlice(alloc, "CustomLocal\x00");
+    const n_custom: u32 = @intCast(strtab.items.len);
+    try strtab.appendSlice(alloc, "CustomEntry\x00");
+    const n_ldata: u32 = @intCast(strtab.items.len);
+    try strtab.appendSlice(alloc, "localdata\x00");
     const strtab_off = try tv.append(strtab.items);
 
     // shstrtab.
@@ -299,7 +333,11 @@ test "generate map from synthetic elf32" {
     _ = try tv.appendValue(Sym{ .name = n_func, .value = 0x400100, .size = 16, .info = 0x10, .other = 0, .shndx = 1 });
     _ = try tv.appendValue(Sym{ .name = n_data, .value = 0x402000, .size = 8, .info = 0x11, .other = 0, .shndx = 2 });
     _ = try tv.appendValue(Sym{ .name = n_imp, .value = 0, .size = 0, .info = 0x10, .other = 0, .shndx = SHN_UNDEF });
-    const symtab_size: u32 = 4 * @sizeOf(Sym);
+    _ = try tv.appendValue(Sym{ .name = n_jump, .value = 0x400200, .size = 4, .info = 0x00, .other = 0, .shndx = 1 });
+    _ = try tv.appendValue(Sym{ .name = n_clocal, .value = 0x400300, .size = 4, .info = 0x00, .other = 0, .shndx = 1 });
+    _ = try tv.appendValue(Sym{ .name = n_custom, .value = 0x400104, .size = 32, .info = 0x10, .other = 0, .shndx = 1 });
+    _ = try tv.appendValue(Sym{ .name = n_ldata, .value = 0x402008, .size = 4, .info = 0x01, .other = 0, .shndx = 2 });
+    const symtab_size: u32 = 8 * @sizeOf(Sym);
 
     // Section headers: null, .text, .data, .symtab, .strtab, .shstrtab.
     try tv.alignTo(4);
@@ -342,7 +380,9 @@ test "generate map from synthetic elf32" {
         \\section .text vaddr 0x400100 off 0x0 filesz 0x4 memsz 0x4 flags r-x
         \\section .data vaddr 0x402000 off 0x1f00 filesz 0x8 memsz 0x8 flags rw-
         \\sym FUNC_000020 0x400100 0x10 func
+        \\sym CustomEntry 0x400104 0x20 func
         \\sym DATA_0001 0x402000 0x8 data
+        \\sym localdata 0x402008 0x4 data
         \\import _C_DrawSprite
         \\
     ;
