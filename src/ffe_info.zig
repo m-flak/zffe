@@ -28,14 +28,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("shim: {s}\n", .{std.mem.span(bridge.zffe_version())});
     std.debug.print("base: 0x{x}  entry: 0x{x}  image: {} bytes\n", .{ img.base, img.entry, img.image_size });
-    for (img.sectionSlice()) |*s| {
-        std.debug.print("  section {s}: vaddr 0x{x} off 0x{x} filesz 0x{x} memsz 0x{x} flags {c}{c}{c}\n", .{
-            s.nameSlice(), s.vaddr, s.file_off, s.file_sz, s.mem_sz,
-            if (s.flags & bridge.Sec.r != 0) @as(u8, 'r') else @as(u8, '-'),
-            if (s.flags & bridge.Sec.w != 0) @as(u8, 'w') else @as(u8, '-'),
-            if (s.flags & bridge.Sec.x != 0) @as(u8, 'x') else @as(u8, '-'),
-        });
-    }
+    std.debug.print("  code: 0x{x}..0x{x}  mem: 0x{x}..0x{x}\n", .{ img.code_start, img.code_end, img.base, img.mem_end });
 
     var nfunc: usize = 0;
     var ndata: usize = 0;

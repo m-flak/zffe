@@ -12,12 +12,6 @@ pub const SymKind = enum(c_int) {
     data = 2,
 };
 
-pub const Sec = struct {
-    pub const r: u32 = 1;
-    pub const w: u32 = 2;
-    pub const x: u32 = 4;
-};
-
 pub const Func = extern struct {
     name: [*:0]const u8,
     addr: u64,
@@ -32,41 +26,23 @@ pub const Func = extern struct {
     }
 };
 
-pub const Section = extern struct {
-    name: [16]u8,
-    vaddr: u64,
-    file_off: u64,
-    file_sz: u64,
-    mem_sz: u64,
-    flags: u32,
-    reserved: u32,
-
-    pub fn nameSlice(s: *const Section) []const u8 {
-        const len = std.mem.indexOfScalar(u8, &s.name, 0) orelse s.name.len;
-        return s.name[0..len];
-    }
-};
-
 pub const Image = extern struct {
     llvm_ctx: ?*anyopaque,
     llvm_mod: ?*anyopaque,
     funcs: [*]Func,
     nfuncs: usize,
-    sections: [*]Section,
-    nsections: usize,
     image: [*]u8,
     image_size: usize,
     base: u64,
     entry: u64,
+    code_start: u64,
+    code_end: u64,
+    mem_end: u64,
     priv: ?*anyopaque,
     @"error": ?[*:0]u8,
 
     pub fn funcSlice(img: *const Image) []Func {
         return img.funcs[0..img.nfuncs];
-    }
-
-    pub fn sectionSlice(img: *const Image) []Section {
-        return img.sections[0..img.nsections];
     }
 
     pub fn byteSlice(img: *const Image) []u8 {
@@ -142,26 +118,20 @@ test "c layout matches" {
     try t.expectEqual(36, @offsetOf(Func, "decode_ok"));
     try t.expectEqual(40, @offsetOf(Func, "lifted"));
     try t.expectEqual(48, @sizeOf(Func));
-    try t.expectEqual(0, @offsetOf(Section, "name"));
-    try t.expectEqual(16, @offsetOf(Section, "vaddr"));
-    try t.expectEqual(24, @offsetOf(Section, "file_off"));
-    try t.expectEqual(32, @offsetOf(Section, "file_sz"));
-    try t.expectEqual(40, @offsetOf(Section, "mem_sz"));
-    try t.expectEqual(48, @offsetOf(Section, "flags"));
-    try t.expectEqual(56, @sizeOf(Section));
     try t.expectEqual(0, @offsetOf(Image, "llvm_ctx"));
     try t.expectEqual(8, @offsetOf(Image, "llvm_mod"));
     try t.expectEqual(16, @offsetOf(Image, "funcs"));
     try t.expectEqual(24, @offsetOf(Image, "nfuncs"));
-    try t.expectEqual(32, @offsetOf(Image, "sections"));
-    try t.expectEqual(40, @offsetOf(Image, "nsections"));
-    try t.expectEqual(48, @offsetOf(Image, "image"));
-    try t.expectEqual(56, @offsetOf(Image, "image_size"));
-    try t.expectEqual(64, @offsetOf(Image, "base"));
-    try t.expectEqual(72, @offsetOf(Image, "entry"));
-    try t.expectEqual(80, @offsetOf(Image, "priv"));
-    try t.expectEqual(88, @offsetOf(Image, "error"));
-    try t.expectEqual(96, @sizeOf(Image));
+    try t.expectEqual(32, @offsetOf(Image, "image"));
+    try t.expectEqual(40, @offsetOf(Image, "image_size"));
+    try t.expectEqual(48, @offsetOf(Image, "base"));
+    try t.expectEqual(56, @offsetOf(Image, "entry"));
+    try t.expectEqual(64, @offsetOf(Image, "code_start"));
+    try t.expectEqual(72, @offsetOf(Image, "code_end"));
+    try t.expectEqual(80, @offsetOf(Image, "mem_end"));
+    try t.expectEqual(88, @offsetOf(Image, "priv"));
+    try t.expectEqual(96, @offsetOf(Image, "error"));
+    try t.expectEqual(104, @sizeOf(Image));
     try t.expectEqual(1, @intFromEnum(SymKind.func));
     try t.expectEqual(2, @intFromEnum(SymKind.data));
 }
@@ -170,9 +140,8 @@ const fixture_map =
     \\# fixture
     \\base 0x400000
     \\entry 0x401000
-    \\section .text vaddr 0x401000 off 0x0 filesz 0x10 memsz 0x10 flags r-x
-    \\section .data vaddr 0x402000 off 0x10 filesz 0x8 memsz 0x10 flags rw-
-    \\section .bss vaddr 0x403000 off 0x20 filesz 0x0 memsz 0x100 flags rw-
+    \\code 0x401000 0x401010
+    \\mem_end 0x403100
     \\sym FUNC_000020 0x401000 0x10 func
     \\sym DATA_0001 0x402000 0x8 data
     \\import _C_DrawSprite
@@ -211,14 +180,17 @@ test "load/free round trip through the C shim" {
     try t.expect(img.isStub());
     try t.expectEqual(@as(u64, 0x400000), img.base);
     try t.expectEqual(@as(u64, 0x401000), img.entry);
-    try t.expectEqual(@as(usize, 3), img.nsections);
+    try t.expectEqual(@as(u64, 0x401000), img.code_start);
+    try t.expectEqual(@as(u64, 0x401010), img.code_end);
+    try t.expectEqual(@as(u64, 0x403100), img.mem_end);
     try t.expectEqual(@as(usize, 2), img.nfuncs);
-    try t.expectEqual(@as(usize, 0x18), img.image_size);
+    try t.expectEqual(@as(usize, 0x3100), img.image_size);
 
-    const secs = img.sectionSlice();
-    try t.expectEqualStrings(".text", secs[0].nameSlice());
-    try t.expectEqual(Sec.r | Sec.x, secs[0].flags);
-    try t.expectEqualStrings(".data", secs[1].nameSlice());
+    // Dense zero-filled image: file bytes at the start, zeros past EOF.
+    const bytes = img.byteSlice();
+    try t.expectEqual(@as(u8, 0x90), bytes[0]);
+    try t.expectEqual(@as(u8, 0xc3), bytes[0xf]);
+    try t.expectEqual(@as(u8, 0), bytes[0x100]);
 
     const funcs = img.funcSlice();
     try t.expectEqualStrings("FUNC_000020", std.mem.span(funcs[0].name));

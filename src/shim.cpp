@@ -25,24 +25,19 @@ static_assert(offsetof(zffe_func_t, kind) == 32, "abi");
 static_assert(offsetof(zffe_func_t, decode_ok) == 36, "abi");
 static_assert(offsetof(zffe_func_t, lifted) == 40, "abi");
 static_assert(sizeof(zffe_func_t) == 48, "abi");
-static_assert(offsetof(zffe_section_t, vaddr) == 16, "abi");
-static_assert(offsetof(zffe_section_t, file_off) == 24, "abi");
-static_assert(offsetof(zffe_section_t, file_sz) == 32, "abi");
-static_assert(offsetof(zffe_section_t, mem_sz) == 40, "abi");
-static_assert(offsetof(zffe_section_t, flags) == 48, "abi");
-static_assert(sizeof(zffe_section_t) == 56, "abi");
 static_assert(offsetof(zffe_image_t, llvm_mod) == 8, "abi");
 static_assert(offsetof(zffe_image_t, funcs) == 16, "abi");
 static_assert(offsetof(zffe_image_t, nfuncs) == 24, "abi");
-static_assert(offsetof(zffe_image_t, sections) == 32, "abi");
-static_assert(offsetof(zffe_image_t, nsections) == 40, "abi");
-static_assert(offsetof(zffe_image_t, image) == 48, "abi");
-static_assert(offsetof(zffe_image_t, image_size) == 56, "abi");
-static_assert(offsetof(zffe_image_t, base) == 64, "abi");
-static_assert(offsetof(zffe_image_t, entry) == 72, "abi");
-static_assert(offsetof(zffe_image_t, priv) == 80, "abi");
-static_assert(offsetof(zffe_image_t, error) == 88, "abi");
-static_assert(sizeof(zffe_image_t) == 96, "abi");
+static_assert(offsetof(zffe_image_t, image) == 32, "abi");
+static_assert(offsetof(zffe_image_t, image_size) == 40, "abi");
+static_assert(offsetof(zffe_image_t, base) == 48, "abi");
+static_assert(offsetof(zffe_image_t, entry) == 56, "abi");
+static_assert(offsetof(zffe_image_t, code_start) == 64, "abi");
+static_assert(offsetof(zffe_image_t, code_end) == 72, "abi");
+static_assert(offsetof(zffe_image_t, mem_end) == 80, "abi");
+static_assert(offsetof(zffe_image_t, priv) == 88, "abi");
+static_assert(offsetof(zffe_image_t, error) == 96, "abi");
+static_assert(sizeof(zffe_image_t) == 104, "abi");
 
 #if defined(ZFFE_HAVE_REMILL) && ZFFE_HAVE_REMILL
 #  include <remill/Arch/Arch.h>
@@ -103,22 +98,15 @@ uint64_t parse_hex(const char *s, bool &ok) {
   return v;
 }
 
-// Byte offset of `addr` in the flat image, or -1. `want_exec` restricts to
-// executable sections (for the trace manager's TryReadExecutableByte).
+// Dense image: every address in [base, mem_end) has a byte at addr - base.
+// `want_exec` restricts to the code range (for TryReadExecutableByte).
 int64_t image_offset(const zffe_image_t *img, uint64_t addr, bool want_exec,
                      uint64_t *contig = nullptr) {
-  for (size_t i = 0; i < img->nsections; i++) {
-    const zffe_section_t &s = img->sections[i];
-    if (want_exec && !(s.flags & ZFFE_SEC_X)) continue;
-    if (addr < s.vaddr || addr >= s.vaddr + s.mem_sz) continue;
-    uint64_t in_sec = addr - s.vaddr;
-    if (in_sec >= s.file_sz) return -1;  // in .bss tail: no backing bytes
-    if (contig) *contig = s.file_sz - in_sec;
-    int64_t off = (int64_t)(s.file_off + in_sec);
-    if (off < 0 || (uint64_t)off >= img->image_size) return -1;
-    return off;
-  }
-  return -1;
+  if (addr < img->base || addr >= img->mem_end) return -1;
+  if (want_exec && (addr < img->code_start || addr >= img->code_end))
+    return -1;
+  if (contig) *contig = img->mem_end - addr;
+  return (int64_t)(addr - img->base);
 }
 
 }  // namespace
@@ -211,17 +199,10 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
   }
   map_bytes.push_back(0);
 
-  img->image = (uint8_t *)malloc(bin.size() ? bin.size() : 1);
-  if (!img->image) {
-    set_error(img, "out of memory");
-    return img;
-  }
-  memcpy(img->image, bin.data(), bin.size());
-  img->image_size = bin.size();
-
-  std::vector<zffe_section_t> sections;
   std::vector<zffe_func_t> funcs;
   std::vector<std::string> names;  // parallel to funcs; owns name storage
+  bool have_base = false, have_entry = false;
+  bool have_code = false, have_mem_end = false;
 
   char *save = nullptr;
   for (char *line = strtok_r((char *)map_bytes.data(), "\n", &save); line;
@@ -245,6 +226,7 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
         set_error(img, "bad base line in map");
         return img;
       }
+      have_base = true;
     } else if (!strcmp(kind, "entry")) {
       bool ok = false;
       img->entry = parse_hex(strtok_r(nullptr, " \t", &tok_save), ok);
@@ -252,46 +234,26 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
         set_error(img, "bad entry line in map");
         return img;
       }
-    } else if (!strcmp(kind, "section")) {
-      zffe_section_t s;
-      memset(&s, 0, sizeof(s));
-      char *name = strtok_r(nullptr, " \t", &tok_save);
-      if (!name) {
-        set_error(img, "bad section line in map");
+      have_entry = true;
+    } else if (!strcmp(kind, "code")) {
+      bool ok_s = false, ok_e = false;
+      char *s_s = strtok_r(nullptr, " \t", &tok_save);
+      char *s_e = strtok_r(nullptr, " \t", &tok_save);
+      if (s_s) img->code_start = parse_hex(s_s, ok_s);
+      if (s_e) img->code_end = parse_hex(s_e, ok_e);
+      if (!ok_s || !ok_e) {
+        set_error(img, "bad code line in map");
         return img;
       }
-      snprintf(s.name, sizeof(s.name), "%s", name);
-      bool have_v = false, have_o = false, have_f = false, have_m = false;
-      for (char *k; (k = strtok_r(nullptr, " \t", &tok_save));) {
-        char *v = strtok_r(nullptr, " \t", &tok_save);
-        if (!v) break;
-        if (!strcmp(k, "vaddr")) {
-          s.vaddr = parse_hex(v, have_v);
-        } else if (!strcmp(k, "off")) {
-          s.file_off = parse_hex(v, have_o);
-        } else if (!strcmp(k, "filesz")) {
-          s.file_sz = parse_hex(v, have_f);
-        } else if (!strcmp(k, "memsz")) {
-          s.mem_sz = parse_hex(v, have_m);
-        } else if (!strcmp(k, "flags")) {
-          for (const char *p = v; *p; p++) {
-            if (*p == 'r') s.flags |= ZFFE_SEC_R;
-            if (*p == 'w') s.flags |= ZFFE_SEC_W;
-            if (*p == 'x') s.flags |= ZFFE_SEC_X;
-          }
-        }
-      }
-      if (!have_v || !have_o || !have_f || !have_m) {
-        set_error(img, "bad section line in map");
+      have_code = true;
+    } else if (!strcmp(kind, "mem_end")) {
+      bool ok = false;
+      img->mem_end = parse_hex(strtok_r(nullptr, " \t", &tok_save), ok);
+      if (!ok) {
+        set_error(img, "bad mem_end line in map");
         return img;
       }
-      // NOBITS (.bss) sections have no backing bytes; their file_off may
-      // legitimately point at or past EOF.
-      if (s.file_sz > 0 && s.file_off + s.file_sz > img->image_size) {
-        set_error(img, "section extends past end of bin");
-        return img;
-      }
-      sections.push_back(s);
+      have_mem_end = true;
     } else if (!strcmp(kind, "sym")) {
       char *name = strtok_r(nullptr, " \t", &tok_save);
       char *addr_s = strtok_r(nullptr, " \t", &tok_save);
@@ -329,15 +291,31 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
     }
   }
 
-  img->nsections = sections.size();
-  img->sections = (zffe_section_t *)calloc(img->nsections ? img->nsections : 1,
-                                           sizeof(zffe_section_t));
-  if (!img->sections) {
+  if (!have_base || !have_entry || !have_code || !have_mem_end) {
+    set_error(img, "map missing base/entry/code/mem_end");
+    return img;
+  }
+  if (img->mem_end <= img->base) {
+    set_error(img, "bad memory span in map");
+    return img;
+  }
+  if (img->code_end <= img->code_start || img->code_start < img->base ||
+      img->code_end > img->mem_end) {
+    set_error(img, "bad code range in map");
+    return img;
+  }
+  size_t span = (size_t)(img->mem_end - img->base);
+  if (bin.size() > span) {
+    set_error(img, "bin larger than map memory span");
+    return img;
+  }
+  img->image = (uint8_t *)calloc(span ? span : 1, 1);
+  if (!img->image) {
     set_error(img, "out of memory");
     return img;
   }
-  memcpy(img->sections, sections.data(),
-         img->nsections * sizeof(zffe_section_t));
+  memcpy(img->image, bin.data(), bin.size());
+  img->image_size = span;
 
   img->nfuncs = funcs.size();
   img->funcs =
@@ -468,7 +446,6 @@ void zffe_free(zffe_image_t *img) {
     for (size_t i = 0; i < img->nfuncs; i++) free((void *)img->funcs[i].name);
     free(img->funcs);
   }
-  free(img->sections);
   free(img->image);
   free(img->error);
   free(img);

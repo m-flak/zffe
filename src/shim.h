@@ -31,13 +31,6 @@ enum {
   ZFFE_SYM_DATA = 2
 };
 
-/* zffe_section_t.flags bits. */
-enum {
-  ZFFE_SEC_R = 1,
-  ZFFE_SEC_W = 2,
-  ZFFE_SEC_X = 4
-};
-
 typedef struct zffe_func {
   const char *name; /* owned by the image */
   uint64_t addr;
@@ -48,27 +41,18 @@ typedef struct zffe_func {
   int lifted;      /* 0/1 */
 } zffe_func_t;
 
-typedef struct zffe_section {
-  char name[16];
-  uint64_t vaddr;
-  uint64_t file_off; /* offset in ffe.bin */
-  uint64_t file_sz;  /* bytes present in ffe.bin (0 for .bss) */
-  uint64_t mem_sz;   /* in-memory size (>= file_sz; zero-fill the rest) */
-  uint32_t flags;    /* ZFFE_SEC_* bits */
-  uint32_t reserved;
-} zffe_section_t;
-
 typedef struct zffe_image {
   void *llvm_ctx; /* llvm::LLVMContext*; NULL in stub mode */
   void *llvm_mod; /* llvm::Module*; NULL in stub mode */
   zffe_func_t *funcs;
   size_t nfuncs;
-  zffe_section_t *sections;
-  size_t nsections;
-  uint8_t *image; /* flat bytes as loaded from ffe.bin */
+  uint8_t *image; /* dense [base, mem_end) bytes, zero-filled past EOF */
   size_t image_size;
   uint64_t base;
   uint64_t entry;
+  uint64_t code_start; /* executable range, for the trace manager */
+  uint64_t code_end;
+  uint64_t mem_end;
   void *priv;   /* C++-side state (Arch, TraceManager, ...); opaque to Zig */
   char *error;  /* NULL on success, else heap message; cleared on next call */
 } zffe_image_t;
