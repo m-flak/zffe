@@ -41,11 +41,18 @@ typedef struct zffe_func {
   int lifted;      /* 0/1 */
 } zffe_func_t;
 
+typedef struct zffe_import {
+  const char *name; /* owned by the image */
+  uint64_t addr;    /* sentinel address assigned by the sentinel tool */
+} zffe_import_t;
+
 typedef struct zffe_image {
   void *llvm_ctx; /* llvm::LLVMContext*; NULL in stub mode */
   void *llvm_mod; /* llvm::Module*; NULL in stub mode */
   zffe_func_t *funcs;
   size_t nfuncs;
+  zffe_import_t *imports;
+  size_t nimports;
   uint8_t *image; /* dense [base, mem_end) bytes, zero-filled past EOF */
   size_t image_size;
   uint64_t base;

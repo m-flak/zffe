@@ -41,6 +41,10 @@ pub fn main(init: std.process.Init) !void {
         }
     }
     std.debug.print("syms: {} ({} func, {} data, {} unknown)\n", .{ img.nfuncs, nfunc, ndata, nunknown });
+    std.debug.print("imports: {}\n", .{img.nimports});
+    for (img.importSlice()[0..@min(img.nimports, 3)]) |*im| {
+        std.debug.print("  {s} 0x{x}\n", .{ std.mem.span(im.name), im.addr });
+    }
 
     const show = @min(img.nfuncs, 8);
     for (img.funcSlice()[0..show]) |*f| {

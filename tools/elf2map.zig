@@ -21,60 +21,20 @@
 
 const std = @import("std");
 
-const Ehdr = extern struct {
-    ident: [16]u8,
-    e_type: u16,
-    machine: u16,
-    version: u32,
-    entry: u32,
-    phoff: u32,
-    shoff: u32,
-    flags: u32,
-    ehsize: u16,
-    phentsize: u16,
-    phnum: u16,
-    shentsize: u16,
-    shnum: u16,
-    shstrndx: u16,
-};
+const elf32 = @import("elf32.zig");
+const Ehdr = elf32.Ehdr;
+const Shdr = elf32.Shdr;
+const Sym = elf32.Sym;
+const SHT_SYMTAB = elf32.SHT_SYMTAB;
+const SHT_STRTAB = elf32.SHT_STRTAB;
+const SHT_NOBITS = elf32.SHT_NOBITS;
+const SHF_WRITE = elf32.SHF_WRITE;
+const SHF_ALLOC = elf32.SHF_ALLOC;
+const SHF_EXECINSTR = elf32.SHF_EXECINSTR;
+const SHN_UNDEF = elf32.SHN_UNDEF;
+const EM_386 = elf32.EM_386;
 
-const Shdr = extern struct {
-    name: u32,
-    sh_type: u32,
-    flags: u32,
-    addr: u32,
-    offset: u32,
-    size: u32,
-    link: u32,
-    info: u32,
-    addralign: u32,
-    entsize: u32,
-};
-
-const Sym = extern struct {
-    name: u32,
-    value: u32,
-    size: u32,
-    info: u8,
-    other: u8,
-    shndx: u16,
-};
-
-const SHT_SYMTAB: u32 = 2;
-const SHT_STRTAB: u32 = 3;
-const SHT_NOBITS: u32 = 8;
-const SHF_WRITE: u32 = 0x1;
-const SHF_ALLOC: u32 = 0x2;
-const SHF_EXECINSTR: u32 = 0x4;
-const SHN_UNDEF: u16 = 0;
-const EM_386: u16 = 3;
-
-fn sectionName(shstr: []const u8, off: u32) []const u8 {
-    if (off >= shstr.len) return "";
-    const rest = shstr[off..];
-    const len = std.mem.indexOfScalar(u8, rest, 0) orelse rest.len;
-    return rest[0..len];
-}
+const sectionName = elf32.sectionName;
 
 const SymKind = enum { func, data };
 

@@ -26,11 +26,18 @@ pub const Func = extern struct {
     }
 };
 
+pub const Import = extern struct {
+    name: [*:0]const u8,
+    addr: u64,
+};
+
 pub const Image = extern struct {
     llvm_ctx: ?*anyopaque,
     llvm_mod: ?*anyopaque,
     funcs: [*]Func,
     nfuncs: usize,
+    imports: [*]Import,
+    nimports: usize,
     image: [*]u8,
     image_size: usize,
     base: u64,
@@ -43,6 +50,10 @@ pub const Image = extern struct {
 
     pub fn funcSlice(img: *const Image) []Func {
         return img.funcs[0..img.nfuncs];
+    }
+
+    pub fn importSlice(img: *const Image) []Import {
+        return img.imports[0..img.nimports];
     }
 
     pub fn byteSlice(img: *const Image) []u8 {
@@ -118,20 +129,24 @@ test "c layout matches" {
     try t.expectEqual(36, @offsetOf(Func, "decode_ok"));
     try t.expectEqual(40, @offsetOf(Func, "lifted"));
     try t.expectEqual(48, @sizeOf(Func));
+    try t.expectEqual(8, @offsetOf(Import, "addr"));
+    try t.expectEqual(16, @sizeOf(Import));
     try t.expectEqual(0, @offsetOf(Image, "llvm_ctx"));
     try t.expectEqual(8, @offsetOf(Image, "llvm_mod"));
     try t.expectEqual(16, @offsetOf(Image, "funcs"));
     try t.expectEqual(24, @offsetOf(Image, "nfuncs"));
-    try t.expectEqual(32, @offsetOf(Image, "image"));
-    try t.expectEqual(40, @offsetOf(Image, "image_size"));
-    try t.expectEqual(48, @offsetOf(Image, "base"));
-    try t.expectEqual(56, @offsetOf(Image, "entry"));
-    try t.expectEqual(64, @offsetOf(Image, "code_start"));
-    try t.expectEqual(72, @offsetOf(Image, "code_end"));
-    try t.expectEqual(80, @offsetOf(Image, "mem_end"));
-    try t.expectEqual(88, @offsetOf(Image, "priv"));
-    try t.expectEqual(96, @offsetOf(Image, "error"));
-    try t.expectEqual(104, @sizeOf(Image));
+    try t.expectEqual(32, @offsetOf(Image, "imports"));
+    try t.expectEqual(40, @offsetOf(Image, "nimports"));
+    try t.expectEqual(48, @offsetOf(Image, "image"));
+    try t.expectEqual(56, @offsetOf(Image, "image_size"));
+    try t.expectEqual(64, @offsetOf(Image, "base"));
+    try t.expectEqual(72, @offsetOf(Image, "entry"));
+    try t.expectEqual(80, @offsetOf(Image, "code_start"));
+    try t.expectEqual(88, @offsetOf(Image, "code_end"));
+    try t.expectEqual(96, @offsetOf(Image, "mem_end"));
+    try t.expectEqual(104, @offsetOf(Image, "priv"));
+    try t.expectEqual(112, @offsetOf(Image, "error"));
+    try t.expectEqual(120, @sizeOf(Image));
     try t.expectEqual(1, @intFromEnum(SymKind.func));
     try t.expectEqual(2, @intFromEnum(SymKind.data));
 }
@@ -144,7 +159,7 @@ const fixture_map =
     \\mem_end 0x403100
     \\sym FUNC_000020 0x401000 0x10 func
     \\sym DATA_0001 0x402000 0x8 data
-    \\import _C_DrawSprite
+    \\import _C_DrawSprite 0xff000000
     \\
 ;
 
@@ -185,6 +200,10 @@ test "load/free round trip through the C shim" {
     try t.expectEqual(@as(u64, 0x403100), img.mem_end);
     try t.expectEqual(@as(usize, 2), img.nfuncs);
     try t.expectEqual(@as(usize, 0x3100), img.image_size);
+    try t.expectEqual(@as(usize, 1), img.nimports);
+    const imps = img.importSlice();
+    try t.expectEqualStrings("_C_DrawSprite", std.mem.span(imps[0].name));
+    try t.expectEqual(@as(u64, 0xff000000), imps[0].addr);
 
     // Dense zero-filled image: file bytes at the start, zeros past EOF.
     const bytes = img.byteSlice();

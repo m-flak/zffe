@@ -26,18 +26,22 @@ static_assert(offsetof(zffe_func_t, decode_ok) == 36, "abi");
 static_assert(offsetof(zffe_func_t, lifted) == 40, "abi");
 static_assert(sizeof(zffe_func_t) == 48, "abi");
 static_assert(offsetof(zffe_image_t, llvm_mod) == 8, "abi");
+static_assert(offsetof(zffe_import_t, addr) == 8, "abi");
+static_assert(sizeof(zffe_import_t) == 16, "abi");
 static_assert(offsetof(zffe_image_t, funcs) == 16, "abi");
 static_assert(offsetof(zffe_image_t, nfuncs) == 24, "abi");
-static_assert(offsetof(zffe_image_t, image) == 32, "abi");
-static_assert(offsetof(zffe_image_t, image_size) == 40, "abi");
-static_assert(offsetof(zffe_image_t, base) == 48, "abi");
-static_assert(offsetof(zffe_image_t, entry) == 56, "abi");
-static_assert(offsetof(zffe_image_t, code_start) == 64, "abi");
-static_assert(offsetof(zffe_image_t, code_end) == 72, "abi");
-static_assert(offsetof(zffe_image_t, mem_end) == 80, "abi");
-static_assert(offsetof(zffe_image_t, priv) == 88, "abi");
-static_assert(offsetof(zffe_image_t, error) == 96, "abi");
-static_assert(sizeof(zffe_image_t) == 104, "abi");
+static_assert(offsetof(zffe_image_t, imports) == 32, "abi");
+static_assert(offsetof(zffe_image_t, nimports) == 40, "abi");
+static_assert(offsetof(zffe_image_t, image) == 48, "abi");
+static_assert(offsetof(zffe_image_t, image_size) == 56, "abi");
+static_assert(offsetof(zffe_image_t, base) == 64, "abi");
+static_assert(offsetof(zffe_image_t, entry) == 72, "abi");
+static_assert(offsetof(zffe_image_t, code_start) == 80, "abi");
+static_assert(offsetof(zffe_image_t, code_end) == 88, "abi");
+static_assert(offsetof(zffe_image_t, mem_end) == 96, "abi");
+static_assert(offsetof(zffe_image_t, priv) == 104, "abi");
+static_assert(offsetof(zffe_image_t, error) == 112, "abi");
+static_assert(sizeof(zffe_image_t) == 120, "abi");
 
 #if defined(ZFFE_HAVE_REMILL) && ZFFE_HAVE_REMILL
 #  include <remill/Arch/Arch.h>
@@ -131,6 +135,12 @@ class ZffeTraceManager : public remill::TraceManager {
     for (size_t i = 0; i < img->nfuncs; i++) {
       if (img->funcs[i].addr == addr) return img->funcs[i].name;
     }
+    // Import sentinels lift as calls to `import_<sym>` declarations, which
+    // the engine implements natively (trampolines).
+    for (size_t i = 0; i < img->nimports; i++) {
+      if (img->imports[i].addr == addr)
+        return std::string("import_") + img->imports[i].name;
+    }
     return remill::TraceManager::TraceName(addr);
   }
 
@@ -202,6 +212,8 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
 
   std::vector<zffe_func_t> funcs;
   std::vector<std::string> names;  // parallel to funcs; owns name storage
+  std::vector<zffe_import_t> imports;
+  std::vector<std::string> import_names;  // parallel to imports
   bool have_base = false, have_entry = false;
   bool have_code = false, have_mem_end = false;
 
@@ -283,8 +295,23 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
       names.emplace_back(name);
       funcs.push_back(f);
     } else if (!strcmp(kind, "import")) {
-      // Informational for now: the ELF relocations map call sites to these.
-      continue;
+      char *name = strtok_r(nullptr, " \t", &tok_save);
+      char *addr_s = strtok_r(nullptr, " \t", &tok_save);
+      if (!name || !addr_s) {
+        set_error(img, "bad import line in map (want: import <name> <addr>)");
+        return img;
+      }
+      bool ok = false;
+      uint64_t addr = parse_hex(addr_s, ok);
+      if (!ok) {
+        set_error(img, "bad import line in map (want: import <name> <addr>)");
+        return img;
+      }
+      zffe_import_t im;
+      memset(&im, 0, sizeof(im));
+      im.addr = addr;
+      import_names.emplace_back(name);
+      imports.push_back(im);
     } else {
       std::string msg = std::string("unknown map line kind: ") + kind;
       set_error(img, msg.c_str());
@@ -329,6 +356,23 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
   for (size_t i = 0; i < img->nfuncs; i++) {
     img->funcs[i].name = strdup(names[i].c_str());
     if (!img->funcs[i].name) {
+      set_error(img, "out of memory");
+      return img;
+    }
+  }
+
+  img->nimports = imports.size();
+  img->imports = (zffe_import_t *)calloc(img->nimports ? img->nimports : 1,
+                                         sizeof(zffe_import_t));
+  if (!img->imports) {
+    set_error(img, "out of memory");
+    return img;
+  }
+  memcpy(img->imports, imports.data(),
+         img->nimports * sizeof(zffe_import_t));
+  for (size_t i = 0; i < img->nimports; i++) {
+    img->imports[i].name = strdup(import_names[i].c_str());
+    if (!img->imports[i].name) {
       set_error(img, "out of memory");
       return img;
     }
@@ -466,6 +510,11 @@ void zffe_free(zffe_image_t *img) {
   if (img->funcs) {
     for (size_t i = 0; i < img->nfuncs; i++) free((void *)img->funcs[i].name);
     free(img->funcs);
+  }
+  if (img->imports) {
+    for (size_t i = 0; i < img->nimports; i++)
+      free((void *)img->imports[i].name);
+    free(img->imports);
   }
   free(img->image);
   free(img->error);

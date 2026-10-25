@@ -231,7 +231,7 @@ pub fn build(b: *std.Build) void {
     shim_mod.addCSourceFile(.{ .file = b.path("src/guest_mem.cpp"), .flags = shim_cflags.items });
     shim_mod.link_libcpp = true;
 
-    // Host tool: ELF -> ffe.map. Built always so its tests run standalone.
+    // Host tools. Built always so their tests run standalone.
     const elf2map_exe = b.addExecutable(.{
         .name = "elf2map",
         .root_module = b.createModule(.{
@@ -242,6 +242,16 @@ pub fn build(b: *std.Build) void {
     });
     const elf2map_tests = b.addTest(.{ .root_module = elf2map_exe.root_module });
     const run_elf2map_tests = b.addRunArtifact(elf2map_tests);
+    const sentinel_exe = b.addExecutable(.{
+        .name = "sentinel",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/sentinel.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    const sentinel_tests = b.addTest(.{ .root_module = sentinel_exe.root_module });
+    const run_sentinel_tests = b.addRunArtifact(sentinel_tests);
 
     if (want_asm) {
         // -I needs a trailing slash for %include "ffedat.asm" resolution.
@@ -267,11 +277,18 @@ pub fn build(b: *std.Build) void {
         const copy = b.addSystemCommand(&.{objcopy_exe});
         copy.addArgs(&.{ "-O", "binary" });
         copy.addFileArg(elf);
-        const bin = copy.addOutputFileArg("ffe.bin");
+        const bin_raw = copy.addOutputFileArg("ffe.raw.bin");
 
         const gen_map = b.addRunArtifact(elf2map_exe);
         gen_map.addFileArg(elf);
-        const map = gen_map.addOutputFileArg("ffe.map");
+        const map_raw = gen_map.addOutputFileArg("ffe.raw.map");
+
+        const patch = b.addRunArtifact(sentinel_exe);
+        patch.addFileArg(elf);
+        patch.addFileArg(bin_raw);
+        patch.addFileArg(map_raw);
+        const bin = patch.addOutputFileArg("ffe.bin");
+        const map = patch.addOutputFileArg("ffe.map");
 
         const install_bin = b.addInstallFile(bin, "data/ffe.bin");
         const install_map = b.addInstallFile(map, "data/ffe.map");
@@ -315,6 +332,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_elf2map_tests.step);
+    test_step.dependOn(&run_sentinel_tests.step);
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
