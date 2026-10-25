@@ -2,7 +2,7 @@
 //! Usage: ffe-info <ffe.bin> <ffe.map> [--lift]
 
 const std = @import("std");
-const bridge = @import("bridge.zig");
+const bridge = @import("remill").bridge;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;

@@ -3,8 +3,6 @@ const sokol = @import("sokol");
 const sapp = sokol.app;
 const slog = sokol.log;
 
-const zffe = @import("zffe");
-
 export fn init() void {}
 
 export fn frame() void {}
