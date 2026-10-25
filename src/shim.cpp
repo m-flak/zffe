@@ -44,6 +44,7 @@ static_assert(sizeof(zffe_image_t) == 104, "abi");
 #  include <remill/Arch/Instruction.h>
 #  include <remill/BC/TraceLifter.h>
 #  include <remill/BC/Util.h>
+#  include <llvm/IR/Function.h>
 #  include <llvm/IR/LLVMContext.h>
 #  include <llvm/IR/Module.h>
 #endif
@@ -347,6 +348,26 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
   if (!priv->mod) {
     set_error(img, "remill::LoadArchSemantics failed");
     return img;
+  }
+  // Drop Remill's identity-mapping memory intrinsics so our translating
+  // definitions (guest_mem.cpp) win at link time. If lifting ever needs
+  // the originals present, move this strip to just before emit/JIT.
+  {
+    static const char *kMemIntrinsics[] = {
+        "__remill_read_memory_8", "__remill_read_memory_16",
+        "__remill_read_memory_32", "__remill_read_memory_64",
+        "__remill_write_memory_8", "__remill_write_memory_16",
+        "__remill_write_memory_32", "__remill_write_memory_64",
+        "__remill_read_memory_f32", "__remill_read_memory_f64",
+        "__remill_read_memory_f80", "__remill_read_memory_f128",
+        "__remill_write_memory_f32", "__remill_write_memory_f64",
+        "__remill_write_memory_f80", "__remill_write_memory_f128",
+    };
+    for (const char *name : kMemIntrinsics) {
+      if (llvm::Function *f = priv->mod->getFunction(name)) {
+        if (!f->isDeclaration()) f->deleteBody();
+      }
+    }
   }
   img->llvm_ctx = priv->ctx.get();
   img->llvm_mod = priv->mod.get();

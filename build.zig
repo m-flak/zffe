@@ -228,6 +228,7 @@ pub fn build(b: *std.Build) void {
         }
     }
     shim_mod.addCSourceFile(.{ .file = b.path("src/shim.cpp"), .flags = shim_cflags.items });
+    shim_mod.addCSourceFile(.{ .file = b.path("src/guest_mem.cpp"), .flags = shim_cflags.items });
     shim_mod.link_libcpp = true;
 
     // Host tool: ELF -> ffe.map. Built always so its tests run standalone.
