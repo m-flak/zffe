@@ -30,14 +30,20 @@ const std = @import("std");
 const builtin = @import("builtin");
 const heap_mod = @import("guest_heap.zig");
 
-/// Byte offsets into Remill's X86 `State` struct (SSE variant), verified
-/// against Remill's `Arch/X86/Runtime/State.h`: each GPR `Reg` is 8 bytes
-/// (u64 value + volatile guard), ordered rax,rcx,rdx,rbx,rsp,rbp,...;
-/// ST0 is the first 10 bytes of the x87 stack area.
+/// Byte offsets into Remill's X86 `State` struct, verified against
+/// lifting-bits/remill master `include/remill/Arch/X86/Runtime/State.h`
+/// (2026-10-25; re-verify if the pinned Remill moves): ArchState(16) +
+/// vec[32]x64B(2048) + aflag(16) + rflag(8) + seg(24) + addr(96) +
+/// GPR(272, base 2208) + X87Stack(128, base 2480) + ... = 3504 bytes.
+/// GPR alternates volatile-u64 guards with 8-byte Reg slots, starting with
+/// a guard: rax@8 rbx@24 rcx@40 rdx@56 rsi@72 rdi@88 rsp@104 rbp@120 ...
+/// rip@264 (EIP=2472 absolute). X87 elems are 6 pad bytes + 10-byte value.
+/// Reg is a plain union, so dword stores leave the top half untouched --
+/// exactly what lifted 32-bit code does (avoids false deps in the IR).
 pub const state = struct {
-    pub const gpr_rax: usize = 3576;
-    pub const gpr_rsp: usize = 3608;
-    pub const x87_st0: usize = 2496;
+    pub const gpr_rax: usize = 2216;
+    pub const gpr_rsp: usize = 2312;
+    pub const x87_st0: usize = 2486;
 };
 
 /// Adapter signature: exactly Remill's lifted-call ABI.
@@ -57,13 +63,13 @@ var rand_seed: u32 = 1;
 var atexit_fns: [32]u32 = @splat(0);
 var atexit_len: usize = 0;
 
-export fn zffe_tramp_set_base(h: u64) void {
+pub export fn zffe_tramp_set_base(h: u64) void {
     host_base = @intCast(h);
 }
 
 /// `heap_base`/`heap_size` delimit the guest heap window inside the 4 GiB
 /// reservation (must not overlap `[base, mem_end)`).
-export fn zffe_tramp_init(h: u64, heap_base: u32, heap_size: u32) void {
+pub export fn zffe_tramp_init(h: u64, heap_base: u32, heap_size: u32) void {
     host_base = @intCast(h);
     const mem: [*]u8 = @ptrFromInt(@as(usize, @intCast(h)) + heap_base);
     gheap = heap_mod.Heap.init(mem[0..heap_size], heap_base);
@@ -153,7 +159,7 @@ fn normCmp(r: c_int) u32 {
 // Memory adapters
 // ---------------------------------------------------------------------------
 
-export fn tramp_memmove(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_memmove(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const dst = arg(s, 0);
@@ -163,7 +169,7 @@ export fn tramp_memmove(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) 
     ret(s, dst);
 }
 
-export fn tramp_memcpy(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_memcpy(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const dst, const src, const n = .{ arg(s, 0), arg(s, 1), arg(s, 2) };
@@ -171,7 +177,7 @@ export fn tramp_memcpy(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) v
     ret(s, dst);
 }
 
-export fn tramp_memset(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_memset(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const dst, const ch, const n = .{ arg(s, 0), arg(s, 1), arg(s, 2) };
@@ -179,7 +185,7 @@ export fn tramp_memset(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) v
     ret(s, dst);
 }
 
-export fn tramp_memcmp(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_memcmp(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const a: [*]const u8 = @ptrFromInt(host_base + arg(s, 0));
@@ -191,13 +197,13 @@ export fn tramp_memcmp(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) v
 // String adapters
 // ---------------------------------------------------------------------------
 
-export fn tramp_strlen(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_strlen(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     ret(s, @intCast(gstr(arg(s, 0)).len));
 }
 
-export fn tramp_strcpy(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_strcpy(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const dst = arg(s, 0);
@@ -206,7 +212,7 @@ export fn tramp_strcpy(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) v
     ret(s, dst);
 }
 
-export fn tramp_strncpy(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_strncpy(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const dst = arg(s, 0);
@@ -216,7 +222,7 @@ export fn tramp_strncpy(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) 
     ret(s, dst);
 }
 
-export fn tramp_strcat(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_strcat(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const dst = arg(s, 0);
@@ -225,13 +231,13 @@ export fn tramp_strcat(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) v
     ret(s, dst);
 }
 
-export fn tramp_strcmp(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_strcmp(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     ret(s, normCmp(c.strcmp(cstr(arg(s, 0)), cstr(arg(s, 1)))));
 }
 
-export fn tramp_strncmp(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_strncmp(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const a: [*]const u8 = @ptrFromInt(host_base + arg(s, 0));
@@ -239,21 +245,21 @@ export fn tramp_strncmp(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) 
     ret(s, normCmp(c.strncmp(a, b, arg(s, 2))));
 }
 
-export fn tramp_strchr(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_strchr(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const r = c.strchr(cstr(arg(s, 0)), @bitCast(arg(s, 1)));
     ret(s, if (r) |p| guestAddr(p) else 0);
 }
 
-export fn tramp_strrchr(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_strrchr(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const r = c.strrchr(cstr(arg(s, 0)), @bitCast(arg(s, 1)));
     ret(s, if (r) |p| guestAddr(p) else 0);
 }
 
-export fn tramp_strspn(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_strspn(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const str = gstr(arg(s, 0));
@@ -261,7 +267,7 @@ export fn tramp_strspn(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) v
     ret(s, @intCast(std.mem.indexOfNone(u8, str, accept) orelse str.len));
 }
 
-export fn tramp_strcspn(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_strcspn(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const str = gstr(arg(s, 0));
@@ -269,7 +275,7 @@ export fn tramp_strcspn(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) 
     ret(s, @intCast(std.mem.indexOfAny(u8, str, reject) orelse str.len));
 }
 
-export fn tramp_strpbrk(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_strpbrk(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const str_addr = arg(s, 0);
@@ -379,7 +385,7 @@ fn writeEndptr(s: ?*anyopaque, arg_idx: usize, str_addr: u32, end_off: usize) vo
     }
 }
 
-export fn tramp_strtol(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_strtol(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const str_addr = arg(s, 0);
@@ -388,7 +394,7 @@ export fn tramp_strtol(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) v
     ret(s, @bitCast(r.value));
 }
 
-export fn tramp_strtoul(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_strtoul(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const str_addr = arg(s, 0);
@@ -397,13 +403,13 @@ export fn tramp_strtoul(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) 
     ret(s, @bitCast(r.value));
 }
 
-export fn tramp_atoi(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_atoi(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     ret(s, @bitCast(parseStrtol(gstr(arg(s, 0)), 10).value));
 }
 
-export fn tramp_atol(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_atol(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     // Guest long is 32 bits: atol == atoi.
@@ -446,7 +452,7 @@ fn floatPrefixLen(str: []const u8) usize {
     return i;
 }
 
-export fn tramp_strtod(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_strtod(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const str_addr = arg(s, 0);
@@ -460,7 +466,7 @@ export fn tramp_strtod(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) v
     retF64(s, v);
 }
 
-export fn tramp_atof(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_atof(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const str = gstr(arg(s, 0));
@@ -476,7 +482,7 @@ export fn tramp_atof(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) voi
 // stdlib / process adapters
 // ---------------------------------------------------------------------------
 
-export fn tramp_rand(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_rand(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     // MSVC's exact generator: seed = seed*214013 + 2531011, return >>16 & 0x7FFF.
@@ -484,28 +490,28 @@ export fn tramp_rand(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) voi
     ret(s, (rand_seed >> 16) & 0x7FFF);
 }
 
-export fn tramp_malloc(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_malloc(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const hp = &(gheap orelse @panic("malloc before zffe_tramp_init"));
     ret(s, @truncate(hp.malloc(arg(s, 0))));
 }
 
-export fn tramp_free(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_free(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const hp = &(gheap orelse return); // free before init: nothing to account
     _ = hp.free(arg(s, 0));
 }
 
-export fn tramp_exit(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_exit(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const code: i32 = @bitCast(arg(s, 0));
     std.process.exit(if (code < 0 or code > 255) 1 else @intCast(code));
 }
 
-export fn tramp_atexit(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_atexit(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     // Record-only: process exit ends the guest; handlers never run.
@@ -518,7 +524,7 @@ export fn tramp_atexit(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) v
     }
 }
 
-export fn tramp_abs(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_abs(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const v: i32 = @bitCast(arg(s, 0));
@@ -526,7 +532,7 @@ export fn tramp_abs(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void
     ret(s, if (v == std.math.minInt(i32)) @bitCast(v) else @abs(v));
 }
 
-export fn tramp_sqrt(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_sqrt(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const p: *align(1) const u64 = @ptrFromInt(host_base + guestEsp(s) + 4);
@@ -534,19 +540,19 @@ export fn tramp_sqrt(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) voi
     retF64(s, @sqrt(x)); // sqrt(negative) = NaN, matching libm
 }
 
-export fn tramp_tolower(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_tolower(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     ret(s, std.ascii.toLower(@truncate(arg(s, 0))));
 }
 
-export fn tramp_toupper(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_toupper(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     ret(s, std.ascii.toUpper(@truncate(arg(s, 0))));
 }
 
-export fn tramp_clock(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_clock(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     // Wall milliseconds; the guest uses it for frame pacing, not profiling.
@@ -671,7 +677,7 @@ fn allocFile(fd: c_int) u32 {
     return 0; // table full
 }
 
-export fn tramp_fopen(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_fopen(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const cpath: [*:0]const u8 = @ptrFromInt(host_base + arg(s, 0));
@@ -699,7 +705,7 @@ export fn tramp_fopen(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) vo
     ret(s, allocFile(fd));
 }
 
-export fn tramp_fclose(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_fclose(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const handle = arg(s, 0);
@@ -712,7 +718,7 @@ export fn tramp_fclose(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) v
     }
 }
 
-export fn tramp_fread(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_fread(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const buf_addr, const size, const count, const handle = .{ arg(s, 0), arg(s, 1), arg(s, 2), arg(s, 3) };
@@ -735,7 +741,7 @@ export fn tramp_fread(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) vo
     ret(s, @intCast(got / size)); // whole items
 }
 
-export fn tramp_fwrite(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_fwrite(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const buf_addr, const size, const count, const handle = .{ arg(s, 0), arg(s, 1), arg(s, 2), arg(s, 3) };
@@ -758,7 +764,7 @@ export fn tramp_fwrite(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) v
     ret(s, @intCast(wrote / size)); // whole items
 }
 
-export fn tramp_fseek(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_fseek(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     // fseek(stream, offset, whence)
@@ -780,7 +786,7 @@ export fn tramp_fseek(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) vo
     ret(s, if (r < 0) @bitCast(@as(i32, -1)) else 0);
 }
 
-export fn tramp_ftell(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_ftell(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const e = lookupFile(arg(s, 0)) orelse {
@@ -791,7 +797,7 @@ export fn tramp_ftell(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) vo
     ret(s, if (r < 0) @bitCast(@as(i32, -1)) else @truncate(@as(u64, @intCast(r))));
 }
 
-export fn tramp_rewind(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_rewind(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     if (lookupFile(arg(s, 0))) |e| {
@@ -799,7 +805,7 @@ export fn tramp_rewind(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) v
     }
 }
 
-export fn tramp_fputs(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_fputs(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const str = gstr(arg(s, 0));
@@ -819,33 +825,33 @@ fn putcImpl(s: ?*anyopaque) void {
     ret(s, if (writeAllFd(e.fd, &[_]u8{ch})) ch else @bitCast(@as(i32, -1)));
 }
 
-export fn tramp_putc(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_putc(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     putcImpl(s);
 }
 
-export fn tramp_fputc(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_fputc(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     putcImpl(s); // identical semantics to putc here (no macros involved)
 }
 
-export fn tramp_fflush(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_fflush(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     // No userspace buffering in the fd layer: nothing to flush.
     ret(s, 0);
 }
 
-export fn tramp_putchar(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_putchar(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const ch: u8 = @truncate(arg(s, 0));
     ret(s, if (writeAllFd(1, &[_]u8{ch})) ch else @bitCast(@as(i32, -1)));
 }
 
-export fn tramp_puts(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_puts(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const str = gstr(arg(s, 0));
@@ -856,14 +862,14 @@ export fn tramp_puts(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) voi
     ret(s, 1); // non-negative on success
 }
 
-export fn tramp_remove(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_remove(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const cpath: [*:0]const u8 = @ptrFromInt(host_base + arg(s, 0));
     ret(s, if (c.unlink(cpath) == 0) 0 else @bitCast(@as(i32, -1)));
 }
 
-export fn tramp_unlink(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_unlink(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     // Same handling as remove() on hosted platforms.
@@ -871,7 +877,7 @@ export fn tramp_unlink(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) v
     ret(s, if (c.unlink(cpath) == 0) 0 else @bitCast(@as(i32, -1)));
 }
 
-export fn tramp_getcwd(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_getcwd(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const buf_addr, const size = .{ arg(s, 0), arg(s, 1) };
@@ -1184,7 +1190,7 @@ fn vformat(out: []u8, fmt: []const u8, va: *VaList) Emit {
     return e;
 }
 
-export fn tramp_printf(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_printf(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     var buf: [65536]u8 = undefined;
@@ -1194,7 +1200,7 @@ export fn tramp_printf(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) v
     ret(s, @intCast(e.total));
 }
 
-export fn tramp_sprintf(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_sprintf(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const dst_addr = arg(s, 0);
@@ -1207,7 +1213,7 @@ export fn tramp_sprintf(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) 
     ret(s, @intCast(e.total));
 }
 
-export fn tramp_fprintf(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_fprintf(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const e = lookupFile(arg(s, 0)) orelse {
@@ -1224,7 +1230,7 @@ export fn tramp_fprintf(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) 
     ret(s, @intCast(out.total));
 }
 
-export fn tramp_vfprintf(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_vfprintf(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     const e = lookupFile(arg(s, 0)) orelse {
@@ -1492,7 +1498,7 @@ fn vsscanf(input: []const u8, fmt: []const u8, va: *VaList) i32 {
     return assigned;
 }
 
-export fn tramp_sscanf(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
+pub export fn tramp_sscanf(s: ?*anyopaque, pc: u32, mem: ?*anyopaque) callconv(.c) void {
     _ = pc;
     _ = mem;
     var va = guestVa(s, 2);
@@ -1566,9 +1572,24 @@ pub const table = [_]Entry{
     .{ .name = "sscanf", .f = tramp_sscanf },
 };
 
+/// Heap tripwire for the engine: bytes allocated/freed and the high-water
+/// mark. Matched alloc/free counts with a climbing high-water mark mean the
+/// guest needs a real free-list (see guest_heap.zig).
+pub export fn zffe_heap_stats(alloc: *u64, freed: *u64, high: *u64) void {
+    if (gheap) |*hp| {
+        alloc.* = hp.bytes_allocated;
+        freed.* = hp.bytes_freed;
+        high.* = hp.highWater();
+    } else {
+        alloc.* = 0;
+        freed.* = 0;
+        high.* = 0;
+    }
+}
+
 /// Resolve an import name (with or without the guest's `_` prefix) to its
 /// adapter, or NULL when the engine must handle it (C_* hooks) or fail.
-export fn zffe_tramp_resolve(name_ptr: [*:0]const u8) ?*const TrampFn {
+pub export fn zffe_tramp_resolve(name_ptr: [*:0]const u8) ?*const TrampFn {
     const name = std.mem.span(name_ptr);
     const bare = if (std.mem.startsWith(u8, name, "_")) name[1..] else name;
     for (table) |e| {

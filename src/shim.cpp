@@ -521,4 +521,38 @@ void zffe_free(zffe_image_t *img) {
   free(img);
 }
 
+// X86 State blob layout, verified against lifting-bits/remill master
+// `include/remill/Arch/X86/Runtime/State.h` (2026-10-25; re-verify if the
+// pinned Remill moves): ArchState(16) + vec[32]x64B(2048) + aflag(16) +
+// rflag/Flags(8) + seg(24) + addr(96) + GPR(272) + X87Stack(128) +
+// mmx(128) + sw(24) + pad(8) + x87(512) + seg_caches(96) + k_reg(128).
+// Cross-checked: GPR members sum to 272, whole struct to 3504, matching
+// upstream's own static_asserts. Flip-time step: add
+// `static_assert(X86_OFF_GPR_RIP == offsetof(State, gpr.rip))`-style checks
+// against the real headers once Remill is available.
+#define X86_STATE_SIZE 3504
+#define X86_OFF_RFLAGS 2080 /* Flags.flat: full RFLAGS bits */
+#define X86_OFF_GPR_RIP 2472 /* GPR base 2208 + rip@264 */
+#define X86_OFF_GPR_RSP 2312 /* GPR base 2208 + rsp@104 */
+
+void *zffe_state_new(uint32_t esp, uint32_t eip) {
+  uint8_t *st = (uint8_t *)calloc(1, X86_STATE_SIZE);
+  if (!st) return NULL;
+  // EFLAGS = 0x202: reserved bit 1 always set, IF set, everything else
+  // clear (consistent with the zeroed aflag bytes: DF=0, all CCs clear).
+  // Segments stay zero: flat model, all AddressSpace bases zero.
+  // Known follow-up: a Win32 guest using FS: (TEB) needs a real FS base.
+  uint64_t rflags = 0x202;
+  memcpy(st + X86_OFF_RFLAGS, &rflags, sizeof(rflags));
+  // ESP/EIP: low halves only, tops untouched -- matches what lifted
+  // 32-bit stores do (Reg is a plain union; no zero-extension in the IR).
+  memcpy(st + X86_OFF_GPR_RSP, &esp, sizeof(esp));
+  memcpy(st + X86_OFF_GPR_RIP, &eip, sizeof(eip));
+  return st;
+}
+
+void zffe_state_free(void *state) {
+  free(state);
+}
+
 }  // extern "C"

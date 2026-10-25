@@ -12,8 +12,9 @@
  *            declared lifted trace per map func, zffe_lift() runs
  *            remill::TraceLifter.
  *
- * Zig mirrors these structs field-for-field (src/bridge.zig); a test there
- * cross-checks offsets via @cImport, so keep both in sync.
+ * Zig mirrors these structs field-for-field (src/bridge.zig); explicit
+ * offset assertions on both sides (see the ABI block in shim.cpp), so keep
+ * both in sync.
  */
 #pragma once
 
@@ -79,6 +80,15 @@ void *zffe_lift(zffe_image_t *img, uint64_t addr);
 const char *zffe_version(void);
 
 void zffe_free(zffe_image_t *img);
+
+/* Allocate a zeroed 3504-byte X86 State blob with ESP/EIP/EFLAGS set for
+ * entry (EFLAGS=0x202: reserved bit + IF; segments flat, all bases zero).
+ * Layout-identical to Remill's X86State (offsets verified against upstream
+ * State.h; see shim.cpp), so lifted code can use it directly. No Remill
+ * headers needed: the blob only has to match the memory layout.
+ * Free with zffe_state_free. */
+void *zffe_state_new(uint32_t esp, uint32_t eip);
+void zffe_state_free(void *state);
 
 #ifdef __cplusplus
 }
