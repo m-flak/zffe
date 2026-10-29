@@ -65,10 +65,6 @@ pub const Image = extern struct {
         return std.mem.span(e);
     }
 
-    pub fn isStub(img: *const Image) bool {
-        return img.llvm_mod == null;
-    }
-
     pub fn funcByAddr(img: *Image, addr: u64) ?*Func {
         for (img.funcSlice()) |*f| {
             if (f.addr == addr) return f;
@@ -151,13 +147,16 @@ test "c layout matches" {
     try t.expectEqual(2, @intFromEnum(SymKind.data));
 }
 
+// The func sits at the image start so its bytes are the NOPs+ret written to
+// the fixture bin (not zero padding): load smoke-decodes and lift really
+// lifts them.
 const fixture_map =
     \\# fixture
     \\base 0x400000
-    \\entry 0x401000
-    \\code 0x401000 0x401010
+    \\entry 0x400000
+    \\code 0x400000 0x400010
     \\mem_end 0x403100
-    \\sym FUNC_000020 0x401000 0x10 func
+    \\sym FUNC_000020 0x400000 0x10 func
     \\sym DATA_0001 0x402000 0x8 data
     \\import _C_DrawSprite 0xff000000
     \\
@@ -191,12 +190,12 @@ test "load/free round trip through the C shim" {
     const img = try load(bin_path, map_path, null, null);
     defer img.free();
 
-    try t.expectEqualStrings("stub", std.mem.span(zffe_version()));
-    try t.expect(img.isStub());
+    try t.expect(std.mem.startsWith(u8, std.mem.span(zffe_version()), "remill"));
+    try t.expect(img.llvm_mod != null);
     try t.expectEqual(@as(u64, 0x400000), img.base);
-    try t.expectEqual(@as(u64, 0x401000), img.entry);
-    try t.expectEqual(@as(u64, 0x401000), img.code_start);
-    try t.expectEqual(@as(u64, 0x401010), img.code_end);
+    try t.expectEqual(@as(u64, 0x400000), img.entry);
+    try t.expectEqual(@as(u64, 0x400000), img.code_start);
+    try t.expectEqual(@as(u64, 0x400010), img.code_end);
     try t.expectEqual(@as(u64, 0x403100), img.mem_end);
     try t.expectEqual(@as(usize, 2), img.nfuncs);
     try t.expectEqual(@as(usize, 0x3100), img.image_size);
@@ -213,20 +212,23 @@ test "load/free round trip through the C shim" {
 
     const funcs = img.funcSlice();
     try t.expectEqualStrings("FUNC_000020", std.mem.span(funcs[0].name));
-    try t.expectEqual(@as(u64, 0x401000), funcs[0].addr);
+    try t.expectEqual(@as(u64, 0x400000), funcs[0].addr);
     try t.expectEqual(SymKind.func, funcs[0].symKind());
-    try t.expect(funcs[0].llvm_func != null); // stub sentinel
-    try t.expectEqual(@as(c_int, -1), funcs[0].decode_ok);
+    try t.expect(funcs[0].llvm_func != null); // declared lifted trace
+    try t.expectEqual(@as(c_int, 1), funcs[0].decode_ok); // NOP decodes
     try t.expectEqual(SymKind.data, funcs[1].symKind());
 
-    // Stub lift marks the record and returns the sentinel.
-    const fn_ptr = zffe_lift(img, 0x401000);
+    // Real lift of NOPs+ret succeeds and marks the record.
+    const fn_ptr = zffe_lift(img, 0x400000);
     try t.expect(fn_ptr != null);
     try t.expectEqual(@as(c_int, 1), funcs[0].lifted);
 
-    // Unknown address fails with a message.
-    try t.expect(zffe_lift(img, 0xdead) == null);
-    try t.expect(img.errMsg() != null);
+    // Unknown address lifts to a missing-block `sub_xxxx` trace: remill
+    // terminates unreadable traces with MissingBlock instead of failing.
+    const missing = zffe_lift(img, 0xdead);
+    try t.expect(missing != null);
+    try t.expect(img.errMsg() == null);
+    try t.expectEqual(@as(usize, 2), img.nfuncs); // no record added
 }
 
 test "load of missing files reports an error" {

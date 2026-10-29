@@ -43,15 +43,13 @@ static_assert(offsetof(zffe_image_t, priv) == 104, "abi");
 static_assert(offsetof(zffe_image_t, error) == 112, "abi");
 static_assert(sizeof(zffe_image_t) == 120, "abi");
 
-#if defined(ZFFE_HAVE_REMILL) && ZFFE_HAVE_REMILL
-#  include <remill/Arch/Arch.h>
-#  include <remill/Arch/Instruction.h>
-#  include <remill/BC/TraceLifter.h>
-#  include <remill/BC/Util.h>
-#  include <llvm/IR/Function.h>
-#  include <llvm/IR/LLVMContext.h>
-#  include <llvm/IR/Module.h>
-#endif
+#include <remill/Arch/Arch.h>
+#include <remill/Arch/Instruction.h>
+#include <remill/BC/TraceLifter.h>
+#include <remill/BC/Util.h>
+#include <llvm/IR/Function.h>
+#include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/Module.h>
 
 namespace {
 
@@ -116,7 +114,6 @@ int64_t image_offset(const zffe_image_t *img, uint64_t addr, bool want_exec,
 
 }  // namespace
 
-#if defined(ZFFE_HAVE_REMILL) && ZFFE_HAVE_REMILL
 namespace {
 
 struct ZffePriv;
@@ -177,16 +174,11 @@ struct ZffePriv {
 };
 
 }  // namespace
-#endif  // ZFFE_HAVE_REMILL
 
 extern "C" {
 
 const char *zffe_version(void) {
-#if defined(ZFFE_HAVE_REMILL) && ZFFE_HAVE_REMILL
   return "remill 56918a8c+";
-#else
-  return "stub";
-#endif
 }
 
 zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
@@ -378,7 +370,6 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
     }
   }
 
-#if defined(ZFFE_HAVE_REMILL) && ZFFE_HAVE_REMILL
   const char *os_s = (os && *os) ? os : "windows";
   const char *arch_s = (arch_name && *arch_name) ? arch_name : "x86";
   auto priv = std::make_unique<ZffePriv>();
@@ -447,16 +438,6 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
   priv->tm->img = img;
   priv->tm->arch = priv->arch.get();
   img->priv = priv.release();
-#else
-  (void)os;
-  (void)arch_name;
-  // Distinct non-NULL sentinels so the Zig side can exercise the full flow.
-  for (size_t i = 0; i < img->nfuncs; i++) {
-    if (img->funcs[i].kind != ZFFE_SYM_FUNC) continue;
-    img->funcs[i].llvm_func =
-        (void *)(uintptr_t)(img->funcs[i].addr ? img->funcs[i].addr : (i + 1));
-  }
-#endif
 
   set_error(img, nullptr);
   return img;
@@ -472,7 +453,6 @@ void *zffe_lift(zffe_image_t *img, uint64_t addr) {
       break;
     }
   }
-#if defined(ZFFE_HAVE_REMILL) && ZFFE_HAVE_REMILL
   auto *priv = static_cast<ZffePriv *>(img->priv);
   if (!priv) {
     set_error(img, "image has no remill state");
@@ -492,21 +472,11 @@ void *zffe_lift(zffe_image_t *img, uint64_t addr) {
     rec->lifted = 1;
   }
   return fn;
-#else
-  if (!rec) {
-    set_error(img, "unknown address (not in map)");
-    return nullptr;
-  }
-  rec->lifted = 1;
-  return rec->llvm_func;
-#endif
 }
 
 void zffe_free(zffe_image_t *img) {
   if (!img) return;
-#if defined(ZFFE_HAVE_REMILL) && ZFFE_HAVE_REMILL
   delete static_cast<ZffePriv *>(img->priv);
-#endif
   if (img->funcs) {
     for (size_t i = 0; i < img->nfuncs; i++) free((void *)img->funcs[i].name);
     free(img->funcs);
