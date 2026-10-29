@@ -94,11 +94,11 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             // List of modules available for import in source files part of the
-            // root module. (The exe will import "lifting" once it drives the
-            // guest; until then it needs only sokol/cimgui.)
+            // root module.
             .imports = &.{
                 .{ .name = "sokol", .module = dep_sokol.module("sokol") },
                 .{ .name = cimgui_conf.module_name, .module = dep_cimgui.module(cimgui_conf.module_name) },
+                .{ .name = "lifting", .module = lifting_mod },
             },
         }),
     });
@@ -155,9 +155,10 @@ pub fn build(b: *std.Build) void {
 
     // ---- FFE image pipeline: asm/ -> ffe.elf -> ffe.bin + ffe.map ----
     // `zig build` assembles, links, generates the map, compiles the shim +
-    // Zig code, and installs zffe + ffe-info + data/ffe.{bin,map,elf}.
+    // Zig code, and installs zffe + ffe-info + bin/data/ffe.{bin,map,elf}.
+    // Data sits next to the binaries so nothing references it via `..`.
     // Inspect with:
-    //   zig build info -- zig-out/data/ffe.bin zig-out/data/ffe.map --lift
+    //   zig build info -- zig-out/bin/data/ffe.bin zig-out/bin/data/ffe.map --lift
     // The game sources in asm/ are part of this repo; edit them in place.
     const asm_dir = "asm";
     const want_asm = b.option(
@@ -326,9 +327,9 @@ pub fn build(b: *std.Build) void {
         const bin = patch.addOutputFileArg("ffe.bin");
         const map = patch.addOutputFileArg("ffe.map");
 
-        const install_bin = b.addInstallFile(bin, "data/ffe.bin");
-        const install_map = b.addInstallFile(map, "data/ffe.map");
-        const install_elf = b.addInstallFile(elf, "data/ffe.elf");
+        const install_bin = b.addInstallFile(bin, "bin/data/ffe.bin");
+        const install_map = b.addInstallFile(map, "bin/data/ffe.map");
+        const install_elf = b.addInstallFile(elf, "bin/data/ffe.elf");
         b.getInstallStep().dependOn(&install_bin.step);
         b.getInstallStep().dependOn(&install_map.step);
         b.getInstallStep().dependOn(&install_elf.step);

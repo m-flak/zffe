@@ -108,12 +108,14 @@ Useful overrides: `-Dffe-asm=false` (skip the asm pipeline, reuse
 
 ```sh
 # inspect + lift every function in the image
-./zig-out/bin/ffe-info zig-out/data/ffe.bin zig-out/data/ffe.map --lift
+# (or cd zig-out/bin && ./ffe-info data/ffe.bin data/ffe.map --lift)
+./zig-out/bin/ffe-info zig-out/bin/data/ffe.bin zig-out/bin/data/ffe.map --lift
 
 # tests
 zig build test
 
-# the app shell (placeholder window; guest execution not wired up yet)
+# the app: full guest bring-up (engine.init) and lift of every trace
+# from <exe-dir>/data, then opens the (still placeholder) window
 zig build run
 ```
 

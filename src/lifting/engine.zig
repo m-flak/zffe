@@ -1,5 +1,5 @@
 //! Guest bring-up: reserve, load, place, init. Stops short of execution
-//! (that needs Remill plus the JIT runner).
+//! (that needs the JIT runner); callers liftAll before invoking code.
 //!
 //! Layout (defaults; validated against the real map at init):
 //!   [0, 64K)            guard (PROT_NONE, from reservation)
@@ -97,6 +97,25 @@ pub fn deinit(g: *Guest) void {
     g.* = undefined;
 }
 
+pub const LiftError = error{LiftFailed};
+
+/// Lift every function trace. A failed lift is catastrophic: print the
+/// culprit and abort. Returns the number of traces lifted.
+pub fn liftAll(g: *Guest) LiftError!usize {
+    var n: usize = 0;
+    for (g.image.funcSlice()) |*f| {
+        if (f.symKind() != .func) continue;
+        if (bridge.zffe_lift(g.image, f.addr) == null) {
+            std.debug.print("lift failed for {s} (0x{x}): {s}\n", .{
+                std.mem.span(f.name), f.addr, g.image.errMsg() orelse "?",
+            });
+            return error.LiftFailed;
+        }
+        n += 1;
+    }
+    return n;
+}
+
 const t = std.testing;
 
 const fixture_map =
@@ -171,6 +190,24 @@ test "init wires reservation, image, heap, stack, state" {
     trampoline.tramp_free(g.state, 0, null);
     trampoline.zffe_heap_stats(&alloc, &freed, &high);
     try t.expectEqual(alloc, freed);
+}
+
+test "liftAll lifts funcs and skips data" {
+    const io = t.io;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeFixture(tmp.dir, io, fixture_map);
+
+    var path_buf: [256]u8 = undefined;
+    const bin_path = try std.fmt.bufPrintSentinel(&path_buf, ".zig-cache/tmp/{s}/ffe.bin", .{tmp.sub_path[0..]}, 0);
+    const map_path = try std.fmt.bufPrintSentinel(path_buf[128..], ".zig-cache/tmp/{s}/ffe.map", .{tmp.sub_path[0..]}, 0);
+
+    var g = try init(bin_path, map_path, .{});
+    defer deinit(&g);
+
+    const n = try liftAll(&g);
+    try t.expectEqual(@as(usize, 1), n);
+    try t.expectEqual(@as(c_int, 1), g.image.funcSlice()[0].lifted);
 }
 
 test "init rejects bad layout, bad entry, missing files" {
