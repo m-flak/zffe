@@ -72,6 +72,13 @@ pub const Image = extern struct {
         return null;
     }
 
+    pub fn funcByName(img: *Image, name: []const u8) ?*Func {
+        for (img.funcSlice()) |*f| {
+            if (std.mem.eql(u8, std.mem.span(f.name), name)) return f;
+        }
+        return null;
+    }
+
     pub fn free(img: *Image) void {
         zffe_free(img);
     }
@@ -85,6 +92,7 @@ pub extern fn zffe_load(
 ) ?*Image;
 
 pub extern fn zffe_lift(img: *Image, addr: u64) ?*anyopaque;
+pub extern fn zffe_lift_closure(img: *Image) c_int;
 pub extern fn zffe_version() [*:0]const u8;
 pub extern fn zffe_free(img: ?*Image) void;
 
@@ -217,6 +225,9 @@ test "load/free round trip through the C shim" {
     try t.expect(funcs[0].llvm_func != null); // declared lifted trace
     try t.expectEqual(@as(c_int, 1), funcs[0].decode_ok); // NOP decodes
     try t.expectEqual(SymKind.data, funcs[1].symKind());
+    try t.expectEqual(&funcs[0], img.funcByName("FUNC_000020").?);
+    try t.expectEqual(&funcs[1], img.funcByName("DATA_0001").?);
+    try t.expect(img.funcByName("NOPE") == null);
 
     // Real lift of NOPs+ret succeeds and marks the record.
     const fn_ptr = zffe_lift(img, 0x400000);

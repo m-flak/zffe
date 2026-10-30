@@ -72,6 +72,14 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
  * default `sub_xxxx` trace. */
 void *zffe_lift(zffe_image_t *img, uint64_t addr);
 
+/* Lift every direct-edge callee the base lifts left behind, transitively.
+ * Direct calls compile to direct machine calls with no runtime dispatch,
+ * so each needs a body before linking; this drains that worklist until no
+ * dangling trace declarations remain. Returns the number of extra traces
+ * lifted, or -1 with img->error set. Run once after the map loop (liftAll).
+ * No-op when nothing dangles. */
+int zffe_lift_closure(zffe_image_t *img);
+
 /* "remill <commit-ish>". */
 const char *zffe_version(void);
 
@@ -85,6 +93,30 @@ void zffe_free(zffe_image_t *img);
  * Free with zffe_state_free. */
 void *zffe_state_new(uint32_t esp, uint32_t eip);
 void zffe_state_free(void *state);
+
+/* In-process JIT over the lifted module (see jit.cpp). One per process.
+ * create() compiles the base module (whatever liftAll lifted; fully lazy
+ * operation works too), links the host runtime (guest memory, helpers,
+ * trampolines), and validates that every referenced external resolves.
+ * It CONSUMES the lift session: img->llvm_mod/ctx are nulled and further
+ * zffe_lift() fails; on-demand lifting of missed indirect targets happens
+ * internally from then on. On failure returns NULL with img->error set
+ * (after an addIRModule failure the image is unusable; anything earlier
+ * leaves it intact for a retry or for inspection).
+ * Free with zffe_jit_free, before zffe_free (dispatch borrows the image). */
+typedef struct zffe_jit zffe_jit_t;
+zffe_jit_t *zffe_jit_create(zffe_image_t *img);
+
+/* Look up a lifted trace by LLVM symbol name (a map func name, or
+ * `sub_<hex>` for synthesized traces) and return its callable address:
+ *   Memory *trace(State *state, uint32_t pc, Memory *mem)
+ * with pc the trace's guest address and mem usually NULL (the memory token
+ * is threaded but the guest runtime ignores it). Returns NULL with
+ * img->error set when the name is unknown. The first lookup compiles the
+ * base module, so it takes the bulk of the JIT time. */
+void *zffe_jit_lookup(zffe_jit_t *jit, zffe_image_t *img, const char *name);
+
+void zffe_jit_free(zffe_jit_t *jit);
 
 #ifdef __cplusplus
 }

@@ -17459,7 +17459,7 @@ FUNC_000208_SysMenuProcessAccel:			; Pos = 1ac54
 		cmp eax, 0xc5
 		jg .notrans
 		sub eax, 0x8b
-	.notrans
+	.notrans:
 
 		add eax,0xffffffca		; was ffffff3f
 		cmp eax,byte +0x4
@@ -87937,7 +87937,7 @@ FUNC_001429_GuiReadAllInput:			; Pos = 5035c
 		jz .accumpress
 		mov dword [eax*4+DATA_KeyAccumTable], 0
 		jmp .accumloopend
-	.accumpress
+	.accumpress:
 		cmp dword [eax*4+DATA_KeyAccumTable], 0
 		jnz .accumloopend
 		mov dword [eax*4+DATA_KeyAccumTable], 1
@@ -87981,7 +87981,7 @@ FUNC_001429_GuiReadAllInput:			; Pos = 5035c
 		cmp word [ebp-8], 0xc7
 		jng NEAR .exclusive			; Check whether pointer is inside window
 
-	.nonexcloutside
+	.nonexcloutside:
 		mov esi, 0
 		mov edi, 0
 
@@ -91932,7 +91932,7 @@ FUNC_001503:			; Pos = 52ec2
 		ret
 
 
-_FUNC_001504
+_FUNC_001504:
 FUNC_001504:			; Pos = 52efe
 
 		push ebp
@@ -100738,7 +100738,7 @@ FUNC_001641_SetWholePalette:			; Pos = 58614
 		mov ebx, DATA_007769
 		xor esi, esi
 
-	.loop
+	.loop:
 
 		push ebx
 		push esi
@@ -104865,7 +104865,7 @@ FUNC_001680:			; Pos = 5b2cc		цикл объектов?
 		jz .onscreen
 		mov word [ebx+0x98],0x8000
 		mov word [ebx+0x9a],0x8000
-	.onscreen
+	.onscreen:
 
 		push edi
 		lea eax,[ebp+0xfffffe98]

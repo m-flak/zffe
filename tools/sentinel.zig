@@ -21,6 +21,8 @@ pub const sentinel_base: u64 = 0xFF000000;
 pub const Output = struct {
     bin: []u8,
     map: []u8,
+    nimports: usize,
+    patched: usize,
 
     pub fn deinit(o: *Output, alloc: std.mem.Allocator) void {
         alloc.free(o.bin);
@@ -165,8 +167,12 @@ pub fn process(
         _ = map_out.pop();
     }
 
-    std.debug.print("sentinel: {d} imports, {d} sites patched\n", .{ import_names.items.len, patched });
-    return .{ .bin = bin, .map = try map_out.toOwnedSlice(alloc) };
+    return .{
+        .bin = bin,
+        .map = try map_out.toOwnedSlice(alloc),
+        .nimports = import_names.items.len,
+        .patched = patched,
+    };
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -193,6 +199,11 @@ pub fn main(init: std.process.Init) !void {
     defer out.deinit(allocator);
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_bin_path, .data = out.bin });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out_map_path, .data = out.map });
+    // Stats go to stdout: build runners flag stderr output as failure.
+    var stdout_buf: [128]u8 = undefined;
+    var stdout = std.Io.File.stdout().writer(io, &stdout_buf);
+    try stdout.interface.print("sentinel: {d} imports, {d} sites patched\n", .{ out.nimports, out.patched });
+    try stdout.flush();
 }
 
 // --- Tests ---

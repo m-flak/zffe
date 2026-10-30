@@ -1,8 +1,11 @@
 //! ffe-info: load ffe.bin+ffe.map through the shim and print a summary.
-//! Usage: ffe-info <ffe.bin> <ffe.map> [--lift]
+//! Usage: ffe-info <ffe.bin> <ffe.map> [--lift] [--jit]
+//! --jit implies --lift, then JIT-links the image and looks up the entry
+//! trace (validating that every referenced external resolves).
 
 const std = @import("std");
 const bridge = @import("lifting").bridge;
+const jit_mod = @import("lifting").jit;
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -12,8 +15,13 @@ pub fn main(init: std.process.Init) !void {
     const bin_path = it.next() orelse return error.BadArgs;
     const map_path = it.next() orelse return error.BadArgs;
     var do_lift = false;
+    var do_jit = false;
     while (it.next()) |a| {
         if (std.mem.eql(u8, a, "--lift")) do_lift = true;
+        if (std.mem.eql(u8, a, "--jit")) {
+            do_jit = true;
+            do_lift = true;
+        }
     }
 
     const img = bridge.zffe_load(bin_path, map_path, null, null) orelse {
@@ -70,5 +78,29 @@ pub fn main(init: std.process.Init) !void {
         }
         std.debug.print("lift: {} ok, {} failed\n", .{ ok, fail });
         if (fail > 0) return error.LiftFailed;
+    }
+
+    if (do_jit) {
+        // Entry may lack a sym (liftAll in the engine covers it, but this
+        // tool lifts map funcs only); lift first, since create() consumes
+        // the lift session.
+        if (img.funcByAddr(img.entry) == null and
+            bridge.zffe_lift(img, img.entry) == null)
+        {
+            std.debug.print("entry lift failed: {s}\n", .{img.errMsg() orelse "?"});
+            return error.LiftFailed;
+        }
+        const j = jit_mod.Jit.create(img) catch {
+            std.debug.print("jit create failed: {s}\n", .{img.errMsg() orelse "?"});
+            return error.JitFailed;
+        };
+        defer j.destroy();
+        var name_buf: [32]u8 = undefined;
+        const entry_name: [:0]const u8 = if (img.funcByAddr(img.entry)) |f|
+            std.mem.span(f.name)
+        else
+            try std.fmt.bufPrintSentinel(&name_buf, "sub_{x}", .{img.entry}, 0);
+        const addr = try j.lookup(img, entry_name);
+        std.debug.print("jit: entry {s} at 0x{x}\n", .{ entry_name, @intFromPtr(addr) });
     }
 }

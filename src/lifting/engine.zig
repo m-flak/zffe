@@ -10,12 +10,14 @@
 
 const std = @import("std");
 const bridge = @import("bridge.zig");
+const jit_mod = @import("jit.zig");
 const reservation = @import("reservation.zig");
 const trampoline = @import("trampoline.zig");
 
 extern fn zffe_mem_set_base(base: u64) void;
 extern fn zffe_state_new(esp: u32, eip: u32) ?*anyopaque;
 extern fn zffe_state_free(state: ?*anyopaque) void;
+extern fn zffe_run_guarded(state: ?*anyopaque, entry: *const jit_mod.GuestFn, pc: u32, mem: ?*anyopaque) callconv(.c) ?*anyopaque;
 
 pub const SENTINEL_BASE: u64 = 0xFF000000;
 
@@ -31,6 +33,7 @@ pub const Guest = struct {
     image: *bridge.Image,
     state: ?*anyopaque,
     layout: Layout,
+    jit: ?jit_mod.Jit = null, // set after liftAll via jit.Jit.create
 };
 
 pub const InitError = error{
@@ -91,6 +94,9 @@ pub fn init(bin_path: [:0]const u8, map_path: [:0]const u8, layout: Layout) Init
 }
 
 pub fn deinit(g: *Guest) void {
+    // JIT first: dispatch borrows the image, and compiled code is only
+    // callable while the reservation lives.
+    if (g.jit) |j| j.destroy();
     zffe_state_free(g.state);
     g.image.free();
     reservation.release(g.base);
@@ -99,8 +105,9 @@ pub fn deinit(g: *Guest) void {
 
 pub const LiftError = error{LiftFailed};
 
-/// Lift every function trace. A failed lift is catastrophic: print the
-/// culprit and abort. Returns the number of traces lifted.
+/// Lift every function trace, plus the entry point when no sym covers it
+/// (as `sub_<hex>`). A failed lift is catastrophic: print the culprit and
+/// abort. Returns the number of traces lifted.
 pub fn liftAll(g: *Guest) LiftError!usize {
     var n: usize = 0;
     for (g.image.funcSlice()) |*f| {
@@ -113,7 +120,71 @@ pub fn liftAll(g: *Guest) LiftError!usize {
         }
         n += 1;
     }
-    return n;
+    if (g.image.funcByAddr(g.image.entry) == null) {
+        if (bridge.zffe_lift(g.image, g.image.entry) == null) {
+            std.debug.print("lift failed for entry (0x{x}): {s}\n", .{
+                g.image.entry, g.image.errMsg() orelse "?",
+            });
+            return error.LiftFailed;
+        }
+        n += 1;
+    }
+    const extra = bridge.zffe_lift_closure(g.image);
+    if (extra < 0) {
+        std.debug.print("lift closure failed: {s}\n", .{g.image.errMsg() orelse "?"});
+        return error.LiftFailed;
+    }
+    return n + @as(usize, @intCast(extra));
+}
+
+pub const CallError = error{ JitMissing, UnknownSymbol, BadSymbol };
+
+/// Guest pc for a callable name: a map sym's address, or the hex tail of a
+/// `sub_<hex>` synthesized trace. Anything else is not callable by name.
+fn pcForCall(img: *bridge.Image, name: []const u8) ?u32 {
+    if (img.funcByName(name)) |f| return @truncate(f.addr);
+    if (std.mem.startsWith(u8, name, "sub_")) {
+        return std.fmt.parseInt(u32, name[4..], 16) catch null;
+    }
+    return null;
+}
+
+/// Invoke guest code by symbol name with cdecl arguments. Pushes a dummy
+/// return address plus the args (so the callee sees args at [ESP+4] as a
+/// real `call` would leave them), invokes the JIT'd trace, and returns EAX.
+/// Traces run under zffe_run_guarded, so guest longjmp (IRET) abandons host
+/// frames and resumes at its target instead of unwinding.
+/// State.ESP is restored unconditionally: callee stack effects don't leak
+/// into the caller. Float returns land in ST0 (see trampoline.state.x87_st0).
+pub fn call(g: *Guest, name: [:0]const u8, args: []const u32) CallError!u32 {
+    const j = g.jit orelse return error.JitMissing;
+    const f = j.lookup(g.image, name) catch |err| switch (err) {
+        error.UnknownSymbol => {
+            std.debug.print("jit lookup failed for {s}: {s}\n", .{
+                name, g.image.errMsg() orelse "?",
+            });
+            return error.UnknownSymbol;
+        },
+    };
+    const pc = pcForCall(g.image, name) orelse return error.BadSymbol;
+
+    const st: [*]u8 = @ptrCast(g.state.?);
+    const esp_p: *align(1) u32 = @ptrCast(st + trampoline.state.gpr_rsp);
+    const esp0 = esp_p.*;
+    const esp1 = esp0 - 4 - 4 * @as(u32, @intCast(args.len));
+    const frame = reservation.slice(g.base, esp1, 4 + 4 * args.len);
+    // Dummy return slot: popped and discarded by the trace's terminal `ret`
+    // (which lowers to a plain LLVM return), never executed.
+    std.mem.writeInt(u32, frame[0..4], 0xDEADBEEF, .little);
+    for (args, 0..) |a, i| {
+        std.mem.writeInt(u32, frame[4 + 4 * i ..][0..4], a, .little);
+    }
+    esp_p.* = esp1;
+    _ = zffe_run_guarded(g.state, f, pc, null);
+    const eax: *align(1) const u32 = @ptrCast(st + trampoline.state.gpr_rax);
+    const ret = eax.*;
+    esp_p.* = esp0;
+    return ret;
 }
 
 const t = std.testing;
@@ -208,6 +279,209 @@ test "liftAll lifts funcs and skips data" {
     const n = try liftAll(&g);
     try t.expectEqual(@as(usize, 1), n);
     try t.expectEqual(@as(c_int, 1), g.image.funcSlice()[0].lifted);
+}
+
+fn writeBinMap(dir: std.Io.Dir, io: std.Io, bin: []const u8, map_text: []const u8) !void {
+    try dir.writeFile(io, .{ .sub_path = "ffe.bin", .data = bin });
+    try dir.writeFile(io, .{ .sub_path = "ffe.map", .data = map_text });
+}
+
+/// Full bring-up for call tests: init, liftAll, JIT. The caller owns the
+/// guest (defer deinit) and the tmp dir.
+fn callGuest(tmp: *std.testing.TmpDir, io: std.Io, bin: []const u8, map_text: []const u8, path_buf: *[256]u8) !Guest {
+    try writeBinMap(tmp.dir, io, bin, map_text);
+    const bin_path = try std.fmt.bufPrintSentinel(path_buf, ".zig-cache/tmp/{s}/ffe.bin", .{tmp.sub_path[0..]}, 0);
+    const map_path = try std.fmt.bufPrintSentinel(path_buf[128..], ".zig-cache/tmp/{s}/ffe.map", .{tmp.sub_path[0..]}, 0);
+    var g = try init(bin_path, map_path, .{});
+    errdefer deinit(&g);
+    _ = try liftAll(&g);
+    g.jit = try jit_mod.Jit.create(g.image);
+    return g;
+}
+
+fn stateEsp(g: *const Guest) u32 {
+    return @as(*align(1) const u32, @ptrCast(@as([*]u8, @ptrCast(g.state.?)) + trampoline.state.gpr_rsp)).*;
+}
+
+test "call by name returns EAX and restores ESP" {
+    const io = t.io;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    // T0: mov eax, 42; ret
+    const bin = [_]u8{ 0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3 };
+    var path_buf: [256]u8 = undefined;
+    var g = try callGuest(&tmp, io, &bin,
+        \\# call fixture
+        \\base 0x400000
+        \\entry 0x400000
+        \\code 0x400000 0x400040
+        \\mem_end 0x403100
+        \\sym T0 0x400000 0x6 func
+        \\
+    , &path_buf);
+    defer deinit(&g);
+
+    try t.expectEqual(@as(u32, 42), try call(&g, "T0", &.{}));
+    try t.expectEqual(@as(u32, 0xFDFFFFF0), stateEsp(&g));
+}
+
+test "call marshals cdecl args" {
+    const io = t.io;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    // ADD2: mov eax, [esp+4]; add eax, [esp+8]; ret
+    const bin = [_]u8{ 0x8B, 0x44, 0x24, 0x04, 0x03, 0x44, 0x24, 0x08, 0xC3 };
+    var path_buf: [256]u8 = undefined;
+    var g = try callGuest(&tmp, io, &bin,
+        \\# call fixture
+        \\base 0x400000
+        \\entry 0x400000
+        \\code 0x400000 0x400040
+        \\mem_end 0x403100
+        \\sym ADD2 0x400000 0x9 func
+        \\
+    , &path_buf);
+    defer deinit(&g);
+
+    try t.expectEqual(@as(u32, 42), try call(&g, "ADD2", &.{ 10, 32 }));
+    try t.expectEqual(@as(u32, 0xFDFFFFF0), stateEsp(&g));
+}
+
+test "indirect jump dispatches and lifts its target on demand" {
+    const io = t.io;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    // DISPATCH @0x400000: mov eax, 0x400010; jmp eax
+    // TARGET   @0x400010 (no sym): mov eax, 40; add eax, 2; ret.
+    // The ADD forces flag-helper references through the miss module,
+    // exercising the cross-module link to the base semantics.
+    var bin: [0x19]u8 = @splat(0x90);
+    bin[0..5].* = .{ 0xB8, 0x10, 0x00, 0x40, 0x00 };
+    bin[5..7].* = .{ 0xFF, 0xE0 };
+    bin[0x10..][0..9].* = .{ 0xB8, 0x28, 0x00, 0x00, 0x00, 0x83, 0xC0, 0x02, 0xC3 };
+    var path_buf: [256]u8 = undefined;
+    var g = try callGuest(&tmp, io, &bin,
+        \\# call fixture
+        \\base 0x400000
+        \\entry 0x400000
+        \\code 0x400000 0x400020
+        \\mem_end 0x403100
+        \\sym DISPATCH 0x400000 0x7 func
+        \\
+    , &path_buf);
+    defer deinit(&g);
+
+    try t.expectEqual(@as(u32, 42), try call(&g, "DISPATCH", &.{}));
+    try t.expectEqual(@as(u32, 0xFDFFFFF0), stateEsp(&g));
+}
+
+test "memory-indirect jump (jump table) dispatches per index" {
+    const io = t.io;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    // SW @0x400000: mov eax, [esp+4]; jmp [0x402000+eax*4]
+    // C0 @0x400020: mov eax, 10; ret
+    // C1 @0x400030: mov eax, 20; ret
+    // TABLE @0x402000: [0x400020, 0x400030]
+    var bin: [0x2008]u8 = @splat(0);
+    bin[0..4].* = .{ 0x8B, 0x44, 0x24, 0x04 };
+    bin[4..11].* = .{ 0xFF, 0x24, 0x85, 0x00, 0x20, 0x40, 0x00 };
+    bin[0x20..][0..6].* = .{ 0xB8, 0x0A, 0x00, 0x00, 0x00, 0xC3 };
+    bin[0x30..][0..6].* = .{ 0xB8, 0x14, 0x00, 0x00, 0x00, 0xC3 };
+    bin[0x2000..][0..8].* = .{ 0x20, 0x00, 0x40, 0x00, 0x30, 0x00, 0x40, 0x00 };
+    var path_buf: [256]u8 = undefined;
+    var g = try callGuest(&tmp, io, &bin,
+        \\# call fixture
+        \\base 0x400000
+        \\entry 0x400000
+        \\code 0x400000 0x400040
+        \\mem_end 0x403100
+        \\sym SW 0x400000 0xb func
+        \\
+    , &path_buf);
+    defer deinit(&g);
+
+    try t.expectEqual(@as(u32, 10), try call(&g, "SW", &.{0}));
+    try t.expectEqual(@as(u32, 20), try call(&g, "SW", &.{1}));
+    try t.expectEqual(@as(u32, 0xFDFFFFF0), stateEsp(&g));
+}
+
+test "entry without a sym lifts as sub_<hex> and calls by synthesized name" {
+    const io = t.io;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    // No sym lines at all: entry 0x400000 holds mov eax, 42; ret.
+    const bin = [_]u8{ 0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3 };
+    var path_buf: [256]u8 = undefined;
+    var g = try callGuest(&tmp, io, &bin,
+        \\# call fixture
+        \\base 0x400000
+        \\entry 0x400000
+        \\code 0x400000 0x400040
+        \\mem_end 0x403100
+        \\
+    , &path_buf);
+    defer deinit(&g);
+
+    try t.expect(g.image.funcByAddr(0x400000) == null);
+    try t.expectEqual(@as(u32, 42), try call(&g, "sub_400000", &.{}));
+}
+
+test "guest longjmp (iret) abandons host frames and resumes" {
+    const io = t.io;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    // F @0x400000: call G; mov eax, 0xBAD; ret (fall-through must NOT run).
+    // PAD @0x400010: mov eax, 42; ret (the longjmp target).
+    // G @0x400020: push eflags/cs/eip for PAD; iret.
+    var bin: [0x31]u8 = @splat(0x90);
+    bin[0..5].* = .{ 0xE8, 0x1B, 0x00, 0x00, 0x00 };
+    bin[5..11].* = .{ 0xB8, 0xAD, 0x0B, 0x00, 0x00, 0xC3 };
+    bin[0x10..][0..6].* = .{ 0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3 };
+    bin[0x20..][0..16].* = .{ 0x68, 0x02, 0x02, 0x00, 0x00, 0x68, 0x23, 0x00, 0x00, 0x00, 0x68, 0x10, 0x00, 0x40, 0x00, 0xCF };
+    bin[0x30] = 0xC3;
+    var path_buf: [256]u8 = undefined;
+    var g = try callGuest(&tmp, io, &bin,
+        \\# call fixture
+        \\base 0x400000
+        \\entry 0x400000
+        \\code 0x400000 0x400040
+        \\mem_end 0x403100
+        \\sym F 0x400000 0xb func
+        \\sym PAD 0x400010 0x6 func
+        \\sym G 0x400020 0x11 func
+        \\
+    , &path_buf);
+    defer deinit(&g);
+
+    try t.expectEqual(@as(u32, 42), try call(&g, "F", &.{}));
+    try t.expectEqual(@as(u32, 0xFDFFFFF0), stateEsp(&g));
+}
+
+test "call errors: missing jit, unknown symbol" {
+    const io = t.io;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const bin = [_]u8{ 0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3 };
+    try writeBinMap(tmp.dir, io, &bin,
+        \\# call fixture
+        \\base 0x400000
+        \\entry 0x400000
+        \\code 0x400000 0x400040
+        \\mem_end 0x403100
+        \\sym T0 0x400000 0x6 func
+        \\
+    );
+    var path_buf: [256]u8 = undefined;
+    const bin_path = try std.fmt.bufPrintSentinel(&path_buf, ".zig-cache/tmp/{s}/ffe.bin", .{tmp.sub_path[0..]}, 0);
+    const map_path = try std.fmt.bufPrintSentinel(path_buf[128..], ".zig-cache/tmp/{s}/ffe.map", .{tmp.sub_path[0..]}, 0);
+    var g = try init(bin_path, map_path, .{});
+    defer deinit(&g);
+    _ = try liftAll(&g);
+
+    try t.expectError(error.JitMissing, call(&g, "T0", &.{}));
+    g.jit = try jit_mod.Jit.create(g.image);
+    try t.expectError(error.UnknownSymbol, call(&g, "NOPE", &.{}));
 }
 
 test "init rejects bad layout, bad entry, missing files" {

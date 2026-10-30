@@ -166,9 +166,9 @@ pub fn build(b: *std.Build) void {
         "ffe-asm",
         "Assemble ffe.bin/ffe.map from asm/ (needs nasm, ld.lld, llvm-objcopy)",
     ) orelse true;
-    const nasm_exe = b.option([]const u8, "nasm", "nasm executable") orelse "nasm";
-    const ffe_ld = b.option([]const u8, "ffe-ld", "ELF linker for the ffe image") orelse "ld.lld";
-    const objcopy_exe = b.option([]const u8, "llvm-objcopy", "llvm-objcopy executable") orelse "llvm-objcopy";
+    const nasm_exe = b.option([]const u8, "nasm", "nasm executable") orelse cfg.nasm_exe;
+    const ffe_ld = b.option([]const u8, "ffe-ld", "ELF linker for the ffe image") orelse cfg.ffe_ld;
+    const objcopy_exe = b.option([]const u8, "llvm-objcopy", "llvm-objcopy executable") orelse cfg.objcopy_exe;
     // Remill/LLVM link inputs.
     var remill_libpaths: std.ArrayList([]const u8) = .empty;
     var remill_syslibs: std.ArrayList([]const u8) = .empty;
@@ -185,11 +185,13 @@ pub fn build(b: *std.Build) void {
     shim_cflags.append(b.allocator, "-std=c++17") catch @panic("OOM");
 
     // Environment was probed by ./configure; here we only split its strings.
-    // glog's CMake target normally provides these defines; without them its
-    // headers refuse to be included (GLOG_EXPORT undefined). Assumes a glog
-    // built with shared libs and gflags support, i.e. the usual system package.
-    shim_cflags.append(b.allocator, "-DGLOG_USE_GLOG_EXPORT") catch @panic("OOM");
-    shim_cflags.append(b.allocator, "-DGLOG_USE_GFLAGS") catch @panic("OOM");
+    // log_extra_defs carries whichever glog header defines the probe found
+    // working (shared-vs-static and gflags support decide the set; glog's
+    // headers refuse to compile without the right ones).
+    var dit = std.mem.tokenizeAny(u8, cfg.log_extra_defs, " \t\r\n");
+    while (dit.next()) |tok| {
+        shim_cflags.append(b.allocator, tok) catch @panic("OOM");
+    }
     shim_mod.addIncludePath(b.graph.cwdRelativePath(cfg.remill_include));
     shim_mod.addIncludePath(b.graph.cwdRelativePath(cfg.xed_include));
     addLibPath(b, &remill_libpaths, cfg.remill_libdir);
@@ -198,6 +200,7 @@ pub fn build(b: *std.Build) void {
     // closure directly, dependents-first for single-pass static linking.
     // Mirrors remill/CMakeLists.txt `target_link_libraries(remill ...)` plus
     // the per-arch libs that remill_arch references from Arch.cpp.
+    // configure.ac verifies each of these exists; keep the two lists in sync.
     const remill_libs = [_][]const u8{
         "remill_bc",
         "remill_os",
@@ -266,6 +269,10 @@ pub fn build(b: *std.Build) void {
     }
     shim_mod.addCSourceFile(.{ .file = b.path("src/lifting/shim.cpp"), .flags = shim_cflags.items });
     shim_mod.addCSourceFile(.{ .file = b.path("src/lifting/guest_mem.cpp"), .flags = shim_cflags.items });
+    shim_mod.addCSourceFile(.{ .file = b.path("src/lifting/runtime.cpp"), .flags = shim_cflags.items });
+    shim_mod.addCSourceFile(.{ .file = b.path("src/lifting/f80.cpp"), .flags = shim_cflags.items });
+    shim_mod.addCSourceFile(.{ .file = b.path("src/lifting/jit.cpp"), .flags = shim_cflags.items });
+    shim_mod.addAssemblyFile(b.path("src/lifting/jump_stub.S"));
     shim_mod.link_libcpp = true;
 
     // Host tools. Built always so their tests run standalone.
@@ -361,9 +368,10 @@ pub fn build(b: *std.Build) void {
     // Link the shim (+ Remill/LLVM) into every module using it.
     // Note: exe_tests shares exe.root_module and lifting_tests shares
     // lifting_mod, so three calls cover all five artifacts.
-    linkFfeDeps(b, exe.root_module, shim_lib, remill_libpaths.items, remill_syslibs.items, remill_frameworks.items);
-    linkFfeDeps(b, info_exe.root_module, shim_lib, remill_libpaths.items, remill_syslibs.items, remill_frameworks.items);
-    linkFfeDeps(b, lifting_mod, shim_lib, remill_libpaths.items, remill_syslibs.items, remill_frameworks.items);
+    const need_libm = target.result.os.tag == .linux;
+    linkFfeDeps(b, exe.root_module, shim_lib, remill_libpaths.items, remill_syslibs.items, remill_frameworks.items, need_libm);
+    linkFfeDeps(b, info_exe.root_module, shim_lib, remill_libpaths.items, remill_syslibs.items, remill_frameworks.items, need_libm);
+    linkFfeDeps(b, lifting_mod, shim_lib, remill_libpaths.items, remill_syslibs.items, remill_frameworks.items, need_libm);
 
     // A top level step for running all tests. dependOn can be called multiple
     // times and since the two run steps do not depend on one another, this will
@@ -394,12 +402,17 @@ fn linkFfeDeps(
     libpaths: []const []const u8,
     syslibs: []const []const u8,
     frameworks: []const []const u8,
+    need_libm: bool,
 ) void {
     mod.linkLibrary(shim_lib);
     mod.link_libcpp = true;
     for (libpaths) |p| mod.addLibraryPath(b.graph.cwdRelativePath(p));
     for (syslibs) |l| mod.linkSystemLibrary(l, .{});
     for (frameworks) |f| mod.linkFramework(f, .{});
+    // x87 transcendentals in lifted code lower to libm calls, resolved at
+    // JIT link time through the process-symbol fallback. glibc keeps libm
+    // split out (macOS folds it into libSystem).
+    if (need_libm) mod.linkSystemLibrary("m", .{});
 }
 
 fn addLibPath(b: *std.Build, paths: *std.ArrayList([]const u8), dir: []const u8) void {

@@ -3,6 +3,7 @@ const sokol = @import("sokol");
 const sapp = sokol.app;
 const slog = sokol.log;
 const engine = @import("lifting").engine;
+const jit_mod = @import("lifting").jit;
 
 export fn init() void {}
 
@@ -51,5 +52,10 @@ fn bringUp(io: std.Io) !engine.Guest {
 
     const n = try engine.liftAll(&guest);
     std.debug.print("lifted {} traces\n", .{n});
+    guest.jit = jit_mod.Jit.create(guest.image) catch |err| {
+        std.debug.print("jit create failed ({}): {s}\n", .{ err, guest.image.errMsg() orelse "?" });
+        return err;
+    };
+    std.debug.print("jit ready\n", .{});
     return guest;
 }

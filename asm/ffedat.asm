@@ -106,23 +106,23 @@ _ffeModelList:
 _instanceList:
 	dd DATA_009133	
 
-_DATA_006821	
+_DATA_006821:	
 	dd DATA_006821
 
-_DATA_008604
+_DATA_008604:
 	dd DATA_008604
-_DATA_008605
+_DATA_008605:
 	dd DATA_008605	
 	
-_DATA_008804
+_DATA_008804:
 	dd DATA_008804
 
-_DATA_008859
+_DATA_008859:
 	dd DATA_008859
-_DATA_008874
+_DATA_008874:
 	dd DATA_008874
 
-_DATA_007684
+_DATA_007684:
 	dd DATA_007684
 	
 _DATA_008861: ;player object ptr
@@ -28439,32 +28439,32 @@ DATA_008694:	; Number of Services hot areas
 	resb 4
 DATA_008695:	; Services hot area list
 	resb 372
-_DATA_CollisionFlags
+_DATA_CollisionFlags:
 DATA_008696:
 	resb 1
-_DATA_CollisionFlags2
+_DATA_CollisionFlags2:
 DATA_008697:
 	resb 1
-_DATA_CollisionObjIndex
+_DATA_CollisionObjIndex:
 DATA_008698:
 	resb 1
-_DATA_LandingCrash
+_DATA_LandingCrash:
 DATA_008699:
 	resb 1
-_DATA_CrashMask
+_DATA_CrashMask:
 DATA_008700:
 	resb 1
 DATA_008701:
 	resb 3
-_DATA_ParentObjPtr
+_DATA_ParentObjPtr:
 DATA_008702:
 	resb 4
-_DATA_Distance
+_DATA_Distance:
 DATA_008703:
 	resb 4
 DATA_008704:
 	resb 4
-_DATA_Altitude
+_DATA_Altitude:
 DATA_008705:
 	resb 4
 DATA_008706:
@@ -28814,10 +28814,10 @@ DATA_008872:
 	resb 1
 DATA_008873:
 	resb 1
-_DATA_DestIndex
+_DATA_DestIndex:
 DATA_008874:
 	resb 1
-_DATA_TargIndex
+_DATA_TargIndex:
 DATA_008875:
 	resb 1
 DATA_008876:

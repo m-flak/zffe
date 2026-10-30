@@ -7,3 +7,7 @@ pub const llvm_cflags = "@LLVM_CXXFLAGS@";
 pub const llvm_ldflags = "@LLVM_LDFLAGS@";
 pub const log_cflags = "@LOGGING_CFLAGS@";
 pub const log_ldflags = "@LOGGING_LIBS@";
+pub const log_extra_defs = "@LOGGING_EXTRA_DEFS@";
+pub const nasm_exe = "@NASM@";
+pub const ffe_ld = "@FFE_LD@";
+pub const objcopy_exe = "@LLVM_OBJCOPY@";

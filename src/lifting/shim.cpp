@@ -6,6 +6,8 @@
 
 #include "shim.h"
 
+#include "shim_priv.h"
+
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
@@ -51,15 +53,16 @@ static_assert(sizeof(zffe_image_t) == 120, "abi");
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 
-namespace {
-
-void set_error(zffe_image_t *img, const char *msg) {
+// Shared with jit.cpp (declared in shim_priv.h).
+void zffe_set_error(zffe_image_t *img, const char *msg) {
   free(img->error);
   img->error = msg ? strdup(msg) : nullptr;
   if (msg && !img->error) {
     img->error = strdup("out of memory");
   }
 }
+
+namespace {
 
 bool read_file(const char *path, std::vector<uint8_t> &out, std::string &err) {
   FILE *f = fopen(path, "rb");
@@ -114,66 +117,14 @@ int64_t image_offset(const zffe_image_t *img, uint64_t addr, bool want_exec,
 
 }  // namespace
 
-namespace {
-
-struct ZffePriv;
-
-// TraceManager over our flat image. Trace naming prefers map symbol names so
-// pre-declared functions get their bodies filled in by the lifter (see
-// TraceLifter::Impl::get_trace_decl, which reuses module->getFunction(name)).
-class ZffeTraceManager : public remill::TraceManager {
- public:
-  zffe_image_t *img = nullptr;
-  const remill::Arch *arch = nullptr;
-  uint64_t cur_entry = 0;
-  std::unordered_map<uint64_t, llvm::Function *> defined;
-
-  std::string TraceName(uint64_t addr) override {
-    for (size_t i = 0; i < img->nfuncs; i++) {
-      if (img->funcs[i].addr == addr) return img->funcs[i].name;
-    }
-    // Import sentinels lift as calls to `import_<sym>` declarations, which
-    // the engine implements natively (trampolines).
-    for (size_t i = 0; i < img->nimports; i++) {
-      if (img->imports[i].addr == addr)
-        return std::string("import_") + img->imports[i].name;
-    }
-    return remill::TraceManager::TraceName(addr);
-  }
-
-  void SetLiftedTraceDefinition(uint64_t addr,
-                                llvm::Function *lifted_func) override {
-    defined[addr] = lifted_func;
-  }
-
-  llvm::Function *GetLiftedTraceDefinition(uint64_t addr) override {
-    auto it = defined.find(addr);
-    if (it != defined.end()) return it->second;
-    if (addr == cur_entry) return nullptr;  // force this one to be lifted
-    // Anything else: hand back (or create) a declaration so the lifter emits
-    // a call instead of recursing. Mirrors remill's SimpleTraceManager.
-    auto *mod = static_cast<llvm::Module *>(img->llvm_mod);
-    std::string name = TraceName(addr);
-    if (auto *fn = mod->getFunction(name)) return fn;
-    return arch->DeclareLiftedFunction(name, mod);
-  }
-
-  bool TryReadExecutableByte(uint64_t addr, uint8_t *byte) override {
-    int64_t off = image_offset(img, addr, /*want_exec=*/true);
-    if (off < 0) return false;
-    if (byte) *byte = img->image[off];
-    return true;
-  }
-};
-
-struct ZffePriv {
-  std::unique_ptr<llvm::LLVMContext> ctx;
-  std::unique_ptr<llvm::Module> mod;
-  remill::Arch::ArchPtr arch;
-  std::unique_ptr<ZffeTraceManager> tm;
-};
-
-}  // namespace
+// TryReadExecutableByte needs image_offset (above), so it lives here rather
+// than in the shared header with the rest of the manager.
+bool ZffeTraceManager::TryReadExecutableByte(uint64_t addr, uint8_t *byte) {
+  int64_t off = image_offset(img, addr, /*want_exec=*/true);
+  if (off < 0) return false;
+  if (byte) *byte = img->image[off];
+  return true;
+}
 
 extern "C" {
 
@@ -192,12 +143,12 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
   std::vector<uint8_t> bin;
   std::string err;
   if (!read_file(bin_path, bin, err)) {
-    set_error(img, err.c_str());
+    zffe_set_error(img, err.c_str());
     return img;
   }
   std::vector<uint8_t> map_bytes;
   if (!read_file(map_path, map_bytes, err)) {
-    set_error(img, err.c_str());
+    zffe_set_error(img, err.c_str());
     return img;
   }
   map_bytes.push_back(0);
@@ -228,7 +179,7 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
       bool ok = false;
       img->base = parse_hex(strtok_r(nullptr, " \t", &tok_save), ok);
       if (!ok) {
-        set_error(img, "bad base line in map");
+        zffe_set_error(img, "bad base line in map");
         return img;
       }
       have_base = true;
@@ -236,7 +187,7 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
       bool ok = false;
       img->entry = parse_hex(strtok_r(nullptr, " \t", &tok_save), ok);
       if (!ok) {
-        set_error(img, "bad entry line in map");
+        zffe_set_error(img, "bad entry line in map");
         return img;
       }
       have_entry = true;
@@ -247,7 +198,7 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
       if (s_s) img->code_start = parse_hex(s_s, ok_s);
       if (s_e) img->code_end = parse_hex(s_e, ok_e);
       if (!ok_s || !ok_e) {
-        set_error(img, "bad code line in map");
+        zffe_set_error(img, "bad code line in map");
         return img;
       }
       have_code = true;
@@ -255,7 +206,7 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
       bool ok = false;
       img->mem_end = parse_hex(strtok_r(nullptr, " \t", &tok_save), ok);
       if (!ok) {
-        set_error(img, "bad mem_end line in map");
+        zffe_set_error(img, "bad mem_end line in map");
         return img;
       }
       have_mem_end = true;
@@ -265,14 +216,14 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
       char *size_s = strtok_r(nullptr, " \t", &tok_save);
       char *kind_s = strtok_r(nullptr, " \t", &tok_save);
       if (!name || !addr_s || !size_s || !kind_s) {
-        set_error(img, "bad sym line in map");
+        zffe_set_error(img, "bad sym line in map");
         return img;
       }
       bool ok_a = false, ok_s = false;
       uint64_t addr = parse_hex(addr_s, ok_a);
       uint64_t size = parse_hex(size_s, ok_s);
       if (!ok_a || !ok_s) {
-        set_error(img, "bad sym line in map");
+        zffe_set_error(img, "bad sym line in map");
         return img;
       }
       zffe_func_t f;
@@ -290,13 +241,13 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
       char *name = strtok_r(nullptr, " \t", &tok_save);
       char *addr_s = strtok_r(nullptr, " \t", &tok_save);
       if (!name || !addr_s) {
-        set_error(img, "bad import line in map (want: import <name> <addr>)");
+        zffe_set_error(img, "bad import line in map (want: import <name> <addr>)");
         return img;
       }
       bool ok = false;
       uint64_t addr = parse_hex(addr_s, ok);
       if (!ok) {
-        set_error(img, "bad import line in map (want: import <name> <addr>)");
+        zffe_set_error(img, "bad import line in map (want: import <name> <addr>)");
         return img;
       }
       zffe_import_t im;
@@ -306,32 +257,32 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
       imports.push_back(im);
     } else {
       std::string msg = std::string("unknown map line kind: ") + kind;
-      set_error(img, msg.c_str());
+      zffe_set_error(img, msg.c_str());
       return img;
     }
   }
 
   if (!have_base || !have_entry || !have_code || !have_mem_end) {
-    set_error(img, "map missing base/entry/code/mem_end");
+    zffe_set_error(img, "map missing base/entry/code/mem_end");
     return img;
   }
   if (img->mem_end <= img->base) {
-    set_error(img, "bad memory span in map");
+    zffe_set_error(img, "bad memory span in map");
     return img;
   }
   if (img->code_end <= img->code_start || img->code_start < img->base ||
       img->code_end > img->mem_end) {
-    set_error(img, "bad code range in map");
+    zffe_set_error(img, "bad code range in map");
     return img;
   }
   size_t span = (size_t)(img->mem_end - img->base);
   if (bin.size() > span) {
-    set_error(img, "bin larger than map memory span");
+    zffe_set_error(img, "bin larger than map memory span");
     return img;
   }
   img->image = (uint8_t *)calloc(span ? span : 1, 1);
   if (!img->image) {
-    set_error(img, "out of memory");
+    zffe_set_error(img, "out of memory");
     return img;
   }
   memcpy(img->image, bin.data(), bin.size());
@@ -341,14 +292,14 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
   img->funcs =
       (zffe_func_t *)calloc(img->nfuncs ? img->nfuncs : 1, sizeof(zffe_func_t));
   if (!img->funcs) {
-    set_error(img, "out of memory");
+    zffe_set_error(img, "out of memory");
     return img;
   }
   memcpy(img->funcs, funcs.data(), img->nfuncs * sizeof(zffe_func_t));
   for (size_t i = 0; i < img->nfuncs; i++) {
     img->funcs[i].name = strdup(names[i].c_str());
     if (!img->funcs[i].name) {
-      set_error(img, "out of memory");
+      zffe_set_error(img, "out of memory");
       return img;
     }
   }
@@ -357,7 +308,7 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
   img->imports = (zffe_import_t *)calloc(img->nimports ? img->nimports : 1,
                                          sizeof(zffe_import_t));
   if (!img->imports) {
-    set_error(img, "out of memory");
+    zffe_set_error(img, "out of memory");
     return img;
   }
   memcpy(img->imports, imports.data(),
@@ -365,7 +316,7 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
   for (size_t i = 0; i < img->nimports; i++) {
     img->imports[i].name = strdup(import_names[i].c_str());
     if (!img->imports[i].name) {
-      set_error(img, "out of memory");
+      zffe_set_error(img, "out of memory");
       return img;
     }
   }
@@ -373,15 +324,17 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
   const char *os_s = (os && *os) ? os : "windows";
   const char *arch_s = (arch_name && *arch_name) ? arch_name : "x86";
   auto priv = std::make_unique<ZffePriv>();
+  priv->os_name = os_s;
+  priv->arch_name = arch_s;
   priv->ctx = std::make_unique<llvm::LLVMContext>();
   priv->arch = remill::Arch::Get(*priv->ctx, os_s, arch_s);
   if (!priv->arch) {
-    set_error(img, "remill::Arch::Get failed (bad os/arch?)");
+    zffe_set_error(img, "remill::Arch::Get failed (bad os/arch?)");
     return img;
   }
   priv->mod = remill::LoadArchSemantics(priv->arch.get());
   if (!priv->mod) {
-    set_error(img, "remill::LoadArchSemantics failed");
+    zffe_set_error(img, "remill::LoadArchSemantics failed");
     return img;
   }
   // Drop Remill's identity-mapping memory intrinsics so our translating
@@ -439,39 +392,82 @@ zffe_image_t *zffe_load(const char *bin_path, const char *map_path,
   priv->tm->arch = priv->arch.get();
   img->priv = priv.release();
 
-  set_error(img, nullptr);
+  zffe_set_error(img, nullptr);
   return img;
 }
 
-void *zffe_lift(zffe_image_t *img, uint64_t addr) {
-  if (!img) return nullptr;
-  set_error(img, nullptr);
-  zffe_func_t *rec = nullptr;
-  for (size_t i = 0; i < img->nfuncs; i++) {
-    if (img->funcs[i].addr == addr) {
-      rec = &img->funcs[i];
-      break;
-    }
-  }
+}  // extern "C"
+
+// Shared lift worker (declared in shim_priv.h, C++ linkage).
+void *zffe_lift_into(zffe_image_t *img, const remill::Arch *arch,
+                     uint64_t addr) {
   auto *priv = static_cast<ZffePriv *>(img->priv);
   if (!priv) {
-    set_error(img, "image has no remill state");
+    zffe_set_error(img, "image has no remill state");
     return nullptr;
   }
+  zffe_func_t *rec = priv->tm->findFunc(addr);
   priv->tm->cur_entry = addr;
-  remill::TraceLifter lifter(priv->arch.get(), priv->tm.get());
+  remill::TraceLifter lifter(arch, priv->tm.get());
   if (!lifter.Lift(addr)) {
-    set_error(img, "remill::TraceLifter::Lift failed");
+    zffe_set_error(img, "remill::TraceLifter::Lift failed");
     return nullptr;
   }
   void *fn = nullptr;
-  auto it = priv->tm->defined.find(addr);
-  if (it != priv->tm->defined.end()) fn = it->second;
+  const auto &which =
+      priv->tm->on_demand ? priv->tm->cur_defined : priv->tm->defined;
+  auto it = which.find(addr);
+  if (it != which.end()) fn = it->second;
   if (rec) {
     rec->llvm_func = fn;
     rec->lifted = 1;
   }
   return fn;
+}
+
+extern "C" {
+
+void *zffe_lift(zffe_image_t *img, uint64_t addr) {
+  if (!img) return nullptr;
+  zffe_set_error(img, nullptr);
+  auto *priv = static_cast<ZffePriv *>(img->priv);
+  if (!priv || !priv->mod) {
+    zffe_set_error(img, "image has no lift session (already handed to JIT?)");
+    return nullptr;
+  }
+  return zffe_lift_into(img, priv->arch.get(), addr);
+}
+
+int zffe_lift_closure(zffe_image_t *img) {
+  if (!img) return -1;
+  zffe_set_error(img, nullptr);
+  auto *priv = static_cast<ZffePriv *>(img->priv);
+  if (!priv || !priv->mod) {
+    zffe_set_error(img, "image has no lift session (already handed to JIT?)");
+    return -1;
+  }
+  int extra = 0;
+  for (;;) {
+    // Snapshot: lifting mutates wanted/defined.
+    std::vector<uint64_t> batch;
+    for (uint64_t a : priv->tm->wanted) {
+      if (!priv->tm->defined.count(a)) batch.push_back(a);
+    }
+    if (batch.empty()) return extra;
+    for (uint64_t a : batch) {
+      if (priv->tm->defined.count(a)) continue;
+      if (!zffe_lift_into(img, priv->arch.get(), a)) {
+        char buf[160];
+        snprintf(buf, sizeof buf,
+                 "cannot lift code reached at guest 0x%llx: %s",
+                 (unsigned long long)a,
+                 img->error ? img->error : "?");
+        zffe_set_error(img, buf);
+        return -1;
+      }
+      extra++;
+    }
+  }
 }
 
 void zffe_free(zffe_image_t *img) {
