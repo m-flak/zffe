@@ -264,14 +264,14 @@ bool isLibmName(const std::string &name) {
 // JIT. Also validates the module actually carries semantics.
 bool promoteISELSymbols(llvm::Module *mod, std::string &err) {
   bool any_remill = false;
-  for (auto &fn : *mod) {
+  for (llvm::Function &fn : *mod) {
     if (startsWith(fn.getName().str(), "__remill_")) {
       any_remill = true;
       break;
     }
   }
   size_t nisels = 0;
-  for (auto &g : mod->globals()) {
+  for (llvm::GlobalVariable &g : mod->globals()) {
     std::string name = g.getName().str();
     if (!startsWith(name, "ISEL_")) continue;
     if (!g.isConstant() || !g.hasInitializer()) continue;
@@ -381,7 +381,7 @@ bool rewriteF80(llvm::Module *mod, std::string &err) {
     return name.substr(0, name.size() - 1);
   };
 
-  for (auto &fn : *mod) {
+  for (llvm::Function &fn : *mod) {
     if (fn.isDeclaration()) continue;
     // Entry allocas for spilled operands/results.
     auto spill = [&](const char *tag) {
@@ -390,8 +390,8 @@ bool rewriteF80(llvm::Module *mod, std::string &err) {
     };
     // Collect first (rewriting mutates the lists).
     std::vector<llvm::Instruction *> work;
-    for (auto &bb : fn) {
-      for (auto &in : bb) {
+    for (llvm::BasicBlock &bb : fn) {
+      for (llvm::Instruction &in : bb) {
         bool want = false;
         if (auto *bo = llvm::dyn_cast<llvm::BinaryOperator>(&in)) {
           want = bo->getType() == f80Ty;
@@ -418,7 +418,7 @@ bool rewriteF80(llvm::Module *mod, std::string &err) {
       }
     }
 
-    for (auto *in : work) {
+    for (llvm::Instruction *in : work) {
       llvm::IRBuilder<> b(in);
       auto spillOp = [&](llvm::Value *v, const char *tag) {
         auto *t = spill(tag);
@@ -622,10 +622,10 @@ bool rewriteF80(llvm::Module *mod, std::string &err) {
   }
 
   // Verification sweep: nothing targeted may remain.
-  for (auto &fn : mod->functions()) {
+  for (llvm::Function &fn : mod->functions()) {
     if (fn.isDeclaration()) continue;
-    for (auto &bb : fn) {
-      for (auto &in : bb) {
+    for (llvm::BasicBlock &bb : fn) {
+      for (llvm::Instruction &in : bb) {
         bool bad = false;
         if (auto *bo = llvm::dyn_cast<llvm::BinaryOperator>(&in)) {
           bad = bo->getType() == f80Ty;
@@ -715,18 +715,18 @@ bool liftOnDemand(zffe_jit *jit, uint32_t pc) {
   // the rest link to the base definitions by name.
   std::unordered_set<llvm::Function *> keep;
   for (auto &kv : priv->tm->cur_defined) keep.insert(kv.second);
-  for (auto &f : *mod) {
+  for (llvm::Function &f : *mod) {
     if (!f.isDeclaration() && !keep.count(&f)) f.deleteBody();
   }
   // ISEL lookup globals are lift-time only; the trace calls the functions
   // directly. Other dead globals stay (harmless unreferenced data).
   {
     std::vector<llvm::GlobalVariable *> dead;
-    for (auto &g : mod->globals()) {
+    for (llvm::GlobalVariable &g : mod->globals()) {
       if (startsWith(g.getName().str(), "ISEL_") && g.use_empty())
         dead.push_back(&g);
     }
-    for (auto *g : dead) g->eraseFromParent();
+    for (llvm::GlobalVariable *g : dead) g->eraseFromParent();
   }
   if (auto *st = mod->getGlobalVariable("__remill_state")) {
     if (st->use_empty()) st->eraseFromParent();
@@ -876,7 +876,7 @@ zffe_jit_t *zffe_jit_create(zffe_image_t *img) {
   std::unordered_set<std::string> host_names;
   for (auto &kv : hosts) host_names.insert(kv.first);
   std::vector<std::pair<std::string, const void *>> imports;
-  for (auto &fn : *mod) {
+  for (llvm::Function &fn : *mod) {
     if (!fn.isDeclaration()) continue;
     std::string name = fn.getName().str();
     if (startsWith(name, "llvm.")) continue;
@@ -918,7 +918,7 @@ zffe_jit_t *zffe_jit_create(zffe_image_t *img) {
     zffe_set_error(img, msg.c_str());
     return nullptr;
   }
-  for (auto &g : mod->globals()) {
+  for (llvm::GlobalVariable &g : mod->globals()) {
     if (!g.isDeclaration()) continue;
     if (g.use_empty()) continue;
     std::string msg =
