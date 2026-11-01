@@ -484,6 +484,34 @@ test "call errors: missing jit, unknown symbol" {
     try t.expectError(error.UnknownSymbol, call(&g, "NOPE", &.{}));
 }
 
+test "jit links direct calls to unimplemented imports as stubs" {
+    const io = t.io;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    // F @0x400000: call 0xFF000000 (an import with no trampoline);
+    // mov eax, 42; ret. The call is never executed (the stub would abort);
+    // the point is that JIT creation succeeds despite it.
+    var bin: [11]u8 = undefined;
+    bin[0] = 0xE8; // call rel32
+    std.mem.writeInt(u32, bin[1..5], 0xFF000000 - 0x400005, .little);
+    bin[5..][0..6].* = .{ 0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3 };
+    var path_buf: [256]u8 = undefined;
+    var g = try callGuest(&tmp, io, &bin,
+        \\# stub fixture
+        \\base 0x400000
+        \\entry 0x400000
+        \\code 0x400000 0x400040
+        \\mem_end 0x403100
+        \\sym F 0x400000 0xb func
+        \\import _ZStubHook 0xff000000
+        \\
+    , &path_buf);
+    defer deinit(&g);
+
+    // The stub is a defined, look-up-able trace.
+    _ = try g.jit.?.lookup(g.image, "import__ZStubHook");
+}
+
 test "init rejects bad layout, bad entry, missing files" {
     const io = t.io;
     var tmp = t.tmpDir(.{});

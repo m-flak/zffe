@@ -78,6 +78,12 @@ pub fn main(init: std.process.Init) !void {
         }
         std.debug.print("lift: {} ok, {} failed\n", .{ ok, fail });
         if (fail > 0) return error.LiftFailed;
+        const extra = bridge.zffe_lift_closure(img);
+        if (extra < 0) {
+            std.debug.print("lift closure failed: {s}\n", .{img.errMsg() orelse "?"});
+            return error.LiftFailed;
+        }
+        std.debug.print("lift closure: {} extra\n", .{extra});
     }
 
     if (do_jit) {

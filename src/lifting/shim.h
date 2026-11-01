@@ -97,7 +97,8 @@ void zffe_state_free(void *state);
 /* In-process JIT over the lifted module (see jit.cpp). One per process.
  * create() compiles the base module (whatever liftAll lifted; fully lazy
  * operation works too), links the host runtime (guest memory, helpers,
- * trampolines), and validates that every referenced external resolves.
+ * trampolines), and validates that every referenced external resolves
+ * (imports without trampolines link as abort stubs naming the import).
  * It CONSUMES the lift session: img->llvm_mod/ctx are nulled and further
  * zffe_lift() fails; on-demand lifting of missed indirect targets happens
  * internally from then on. On failure returns NULL with img->error set

@@ -12,8 +12,11 @@
 // Host-provided symbols (guest_mem.cpp, runtime.cpp, jump_stub.S, Zig
 // trampolines) are defined as absolute symbols; libc stragglers (libm for
 // x87 transcendentals, backend-emitted memcpy) resolve through a
-// process-symbol fallback generator. One JIT per process (the dispatch
-// stubs reach it through a global); single-threaded guest throughout.
+// process-symbol fallback generator. Imports with no trampoline link as
+// per-import abort stubs naming the import instead of failing the link;
+// implementing a trampoline replaces the stub on the next run. One JIT
+// per process (the dispatch stubs reach it through a global);
+// single-threaded guest throughout.
 
 #include "shim.h"
 
@@ -23,6 +26,7 @@
 #include "shim_priv.h"
 
 #include <remill/Arch/Arch.h>
+#include <remill/BC/ABI.h>
 #include <remill/BC/TraceLifter.h>
 #include <llvm/ExecutionEngine/Orc/AbsoluteSymbols.h>
 #include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
@@ -120,6 +124,9 @@ std::vector<std::pair<std::string, const void *>> hostSymbols(void) {
       P("__remill_sync_hyper_call", (const void *)&__remill_sync_hyper_call),
       P("__remill_async_hyper_call",
         (const void *)&__remill_async_hyper_call),
+      // Unimplemented-import abort (called from synthesized IR stubs).
+      P("zffe_unimplemented_import",
+        (const void *)&zffe_unimplemented_import),
       // Guest memory.
       P("__remill_read_memory_8", (const void *)&__remill_read_memory_8),
       P("__remill_read_memory_16", (const void *)&__remill_read_memory_16),
@@ -292,6 +299,35 @@ bool promoteISELSymbols(llvm::Module *mod, std::string &err) {
     return false;
   }
   return true;
+}
+
+// Define an abort-stub body for the `import_<name>` lifted function: a
+// direct call to it reports the import's map name (plus the guest pc
+// argument) and aborts. Lets the JIT link images whose hooks aren't
+// implemented yet; adding a trampoline (trampoline.zig) replaces the stub
+// automatically, since stubs are only synthesized where the resolver
+// finds nothing. Idempotent: already-defined functions are left alone.
+void defineImportStub(llvm::Module *mod, const remill::Arch *arch,
+                      const std::string &import_name) {
+  std::string fname = "import_" + import_name;
+  llvm::Function *fn = mod->getFunction(fname);
+  if (!fn) fn = arch->DeclareLiftedFunction(fname, mod);
+  if (!fn->isDeclaration()) return;
+  llvm::LLVMContext &ctx = mod->getContext();
+  llvm::Type *i32Ty = llvm::Type::getInt32Ty(ctx);
+  llvm::FunctionCallee host = mod->getOrInsertFunction(
+      "zffe_unimplemented_import",
+      llvm::FunctionType::get(llvm::Type::getVoidTy(ctx),
+                              {llvm::PointerType::get(ctx, 0), i32Ty},
+                              false));
+  if (auto *hf = llvm::dyn_cast<llvm::Function>(
+          host.getCallee()->stripPointerCasts()))
+    hf->addFnAttr(llvm::Attribute::NoReturn);
+  llvm::IRBuilder<> b(llvm::BasicBlock::Create(ctx, "", fn));
+  llvm::Value *pc = fn->getArg(remill::kPCArgNum);
+  if (pc->getType() != i32Ty) pc = b.CreateIntCast(pc, i32Ty, false);
+  b.CreateCall(host, {b.CreateGlobalStringPtr(import_name), pc});
+  b.CreateUnreachable();
 }
 
 struct MissGuard {
@@ -870,12 +906,13 @@ zffe_jit_t *zffe_jit_create(zffe_image_t *img) {
   }
 
   // Every REFERENCED external must be explainable: host-provided, a
-  // resolved import, or libm. Anything else fails here with a name, not
-  // pages deep in an ORC link error.
+  // resolved import, a stubbed import (see below), or libm. Anything else
+  // fails here with a name, not pages deep in an ORC link error.
   auto hosts = hostSymbols();
   std::unordered_set<std::string> host_names;
   for (auto &kv : hosts) host_names.insert(kv.first);
   std::vector<std::pair<std::string, const void *>> imports;
+  std::vector<std::string> stubbed;  // referenced imports with no trampoline
   for (llvm::Function &fn : *mod) {
     if (!fn.isDeclaration()) continue;
     std::string name = fn.getName().str();
@@ -889,10 +926,8 @@ zffe_jit_t *zffe_jit_create(zffe_image_t *img) {
     if (startsWith(name, "import_")) {
       const void *tramp = zffe_tramp_resolve(name.c_str() + 7);
       if (!tramp) {
-        std::string msg =
-            "import " + name.substr(7) + " has no trampoline (C_* hook?)";
-        zffe_set_error(img, msg.c_str());
-        return nullptr;
+        stubbed.push_back(name.substr(7));  // abort stub, synthesized below
+        continue;
       }
       imports.push_back({name, tramp});
       continue;
@@ -917,6 +952,22 @@ zffe_jit_t *zffe_jit_create(zffe_image_t *img) {
         "lifted code references " + name + " with no host definition";
     zffe_set_error(img, msg.c_str());
     return nullptr;
+  }
+  // Imports without trampolines (hooks the host hasn't implemented yet)
+  // link as abort stubs naming the import instead of failing the JIT.
+  // Every missing import gets a stub up front (not just referenced ones)
+  // so later on-demand lifts link against the base definitions.
+  for (size_t i = 0; i < img->nimports; i++) {
+    std::string bare = img->imports[i].name;
+    if (!zffe_tramp_resolve(bare.c_str()))
+      defineImportStub(mod, priv->arch.get(), bare);
+  }
+  if (!stubbed.empty()) {
+    fprintf(stderr,
+            "zffe: warning: %zu referenced import(s) have no trampoline "
+            "and were stubbed (calling one aborts):\n",
+            stubbed.size());
+    for (auto &s : stubbed) fprintf(stderr, "zffe:   %s\n", s.c_str());
   }
   for (llvm::GlobalVariable &g : mod->globals()) {
     if (!g.isDeclaration()) continue;

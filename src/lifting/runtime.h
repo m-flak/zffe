@@ -32,6 +32,10 @@ Memory *__remill_async_hyper_call(State &state, addr_t ret_addr, Memory *mem);
 // longjmp (IRET) can abandon host frames and resume at its target.
 Memory *zffe_run_guarded(State *state, TraceFn *entry, uint32_t pc,
                          Memory *mem);
+// Unimplemented-import abort: per-import IR stubs (synthesized by the JIT
+// for imports with no trampoline) call here with the import's map name
+// and the guest pc argument. Never returns.
+void zffe_unimplemented_import(const char *name, uint32_t pc);
 
 // Privileged/host instructions (CPUID, RDTSC, ...). Replaces Remill's own
 // definition on ALL hosts: upstream passes through to the host CPU (wrong

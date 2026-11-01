@@ -56,6 +56,13 @@ Memory *__remill_error(State &state, addr_t addr, Memory *mem) {
   abort();
 }
 
+void zffe_unimplemented_import(const char *name, uint32_t pc) {
+  fprintf(stderr,
+          "zffe: unimplemented import %s called (guest pc 0x%x); aborting\n",
+          name ? name : "?", pc);
+  abort();
+}
+
 }  // extern "C"
 
 namespace {
